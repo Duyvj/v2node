@@ -10,14 +10,14 @@
 
 Luôn pin tag, URL và SHA-256. Không dùng release `latest`, không tải rồi chạy
 installer upstream, và không đưa API key vào argv hoặc shell history. Installer
-`v0.4.4-ram1` đã pin sẵn asset + hash theo kiến trúc nên cùng một lệnh có thể dùng
+`v0.4.4-ram2` đã pin sẵn asset + hash theo kiến trúc nên cùng một lệnh có thể dùng
 cho cả fleet `amd64` và `arm64`.
 
 ## Lệnh cài pin theo tag
 
 ```bash
 wget -O /root/v2node-install.sh \
-  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram1/script/install.sh
+  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram2/script/install.sh
 chmod 700 /root/v2node-install.sh
 sudo /root/v2node-install.sh
 ```
@@ -25,11 +25,11 @@ sudo /root/v2node-install.sh
 Máy mới chưa có `/etc/v2node/config.json` cần thêm `--config-file` hoặc bộ tham số
 panel an toàn như mô tả trong `README.md`.
 
-## Hash release v0.4.4-ram1
+## Hash release v0.4.4-ram2
 
 ```text
-amd64  d293861fad08df0ab4666075c0d79edc4ef7d6473d73cd5ea8b9f0faba674df2
-arm64  1d9c9288d1c84206d9540ea9b7071b4b321b31a0745edb3218669fd762966b5c
+amd64  d7090defddb5261842674dff04f408cec5d99351a667c95013cf6c68d8e41c34
+arm64  34aeeada5dabbd9f2369cd0ab81995d966d1a2e8c2c63e84d4f95bd8544b90ab
 ```
 
 Trong canary, theo dõi ít nhất RSS/cgroup memory, số goroutine, connection hiện

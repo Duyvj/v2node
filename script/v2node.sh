@@ -5,6 +5,10 @@ green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
 
+readonly personal_version="v0.4.4-ram2"
+readonly personal_installer="/usr/local/v2node/install.sh"
+readonly personal_menu="/usr/local/v2node/current/v2node-menu"
+
 cur_dir=$(pwd)
 
 # check root
@@ -106,8 +110,16 @@ before_show_menu() {
     show_menu
 }
 
+run_personal_installer() {
+    if [[ ! -f "$personal_installer" || -L "$personal_installer" ]]; then
+        echo -e "${red}Không tìm thấy installer đã xác minh: ${personal_installer}${plain}"
+        return 1
+    fi
+    bash "$personal_installer" "$@"
+}
+
 install() {
-    bash <(curl -Ls https://raw.githubusercontent.com/wyx2685/v2node/master/script/install.sh)
+    run_personal_installer
     if [[ $? == 0 ]]; then
         if [[ $# == 0 ]]; then
             start
@@ -118,12 +130,11 @@ install() {
 }
 
 update() {
-    if [[ $# == 0 ]]; then
-        echo && echo -n -e "输入指定版本(默认最新版): " && read version
-    else
-        version=$2
+    if [[ -n "${2:-}" && "$2" != "$personal_version" ]]; then
+        echo -e "${red}Bản personal chỉ cho phép bản đã pin ${personal_version}; không cài tag tùy ý.${plain}"
+        return 2
     fi
-    bash <(curl -Ls https://raw.githubusercontent.com/wyx2685/v2node/master/script/install.sh) $version
+    run_personal_installer
     if [[ $? == 0 ]]; then
         echo -e "${green}更新完成，已自动重启 v2node，请使用 v2node log 查看运行日志${plain}"
         exit
@@ -158,34 +169,23 @@ config() {
 }
 
 uninstall() {
-    confirm "确定要卸载 v2node 吗?" "n"
+    confirm "Khôi phục trạng thái trước khi cài v2node-personal?" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
             show_menu
         fi
         return 0
     fi
-    if [[ x"${release}" == x"alpine" ]]; then
-        service v2node stop
-        rc-update del v2node
-        rm /etc/init.d/v2node -f
-    else
-        systemctl stop v2node
-        systemctl disable v2node
-        rm /etc/systemd/system/v2node.service -f
-        systemctl daemon-reload
-        systemctl reset-failed
+    if [[ ! -x /usr/local/bin/v2nodectl ]]; then
+        echo -e "${red}Không tìm thấy v2nodectl; từ chối xóa thủ công để tránh mất config.${plain}"
+        return 1
     fi
-    rm /etc/v2node/ -rf
-    rm /usr/local/v2node/ -rf
-
-    echo ""
-    echo -e "卸载成功，如果你想删除此脚本，则退出脚本后运行 ${green}rm /usr/bin/v2node -f${plain} 进行删除"
-    echo ""
-
-    if [[ $# == 0 ]]; then
-        before_show_menu
+    if /usr/local/bin/v2nodectl rollback; then
+        echo -e "${green}Đã khôi phục trạng thái trước khi cài v2node-personal.${plain}"
+        exit 0
     fi
+    echo -e "${red}Rollback thất bại; không file nào bị xóa cưỡng bức. Hãy kiểm tra log ở trên.${plain}"
+    return 1
 }
 
 start() {
@@ -307,15 +307,20 @@ show_log() {
 }
 
 update_shell() {
-    wget -O /usr/bin/v2node -N --no-check-certificate https://raw.githubusercontent.com/wyx2685/v2node/master/script/v2node.sh
-    if [[ $? != 0 ]]; then
-        echo ""
-        echo -e "${red}下载脚本失败，请检查本机能否连接 Github${plain}"
-        before_show_menu
-    else
-        chmod +x /usr/bin/v2node
-        echo -e "${green}升级脚本成功，请重新运行脚本${plain}" && exit 0
+    local menu_tmp="/usr/bin/.v2node.new.$$"
+    [[ -f "$personal_menu" && ! -L "$personal_menu" ]] || {
+        echo -e "${red}Không tìm thấy menu đã xác minh trong release hiện tại.${plain}"
+        return 1
+    }
+    if ! install -m 0755 "$personal_menu" "$menu_tmp"; then
+        rm -f -- "$menu_tmp"
+        return 1
     fi
+    if ! mv -Tf "$menu_tmp" /usr/bin/v2node; then
+        rm -f -- "$menu_tmp"
+        return 1
+    fi
+    echo -e "${green}Đã khôi phục menu từ release đã xác minh.${plain}" && exit 0
 }
 
 # 0: running, 1: not running, 2: not installed
@@ -425,8 +430,21 @@ generate_v2node_config() {
         local node_id="$2"
         local api_key="$3"
 
-        mkdir -p /etc/v2node >/dev/null 2>&1
-        cat > /etc/v2node/config.json <<EOF
+        case "$api_host" in
+            ""|"https://example.com"|"https://example.com/")
+                echo -e "${red}Panel API address must not be empty or use the example.com placeholder.${plain}"
+                return 2
+                ;;
+        esac
+
+        if ! (
+            umask 077
+            config_dir="/etc/v2node"
+            config_file="${config_dir}/config.json"
+            mkdir -p "$config_dir" >/dev/null 2>&1
+            config_tmp=$(mktemp "${config_file}.tmp.XXXXXX") || exit 1
+            trap 'rm -f -- "$config_tmp"' EXIT
+            cat > "$config_tmp" <<EOF
 {
     "Log": {
         "Level": "warning",
@@ -443,6 +461,21 @@ generate_v2node_config() {
     ]
 }
 EOF
+            if [[ $? != 0 ]]; then
+                exit 1
+            fi
+            chmod 0600 "$config_tmp" &&
+                mv -f -- "$config_tmp" "$config_file" &&
+                chmod 0600 "$config_file"
+            write_status=$?
+            if [[ $write_status == 0 ]]; then
+                trap - EXIT
+            fi
+            exit "$write_status"
+        ); then
+            echo -e "${red}Failed to write /etc/v2node/config.json securely.${plain}"
+            return 1
+        fi
         echo -e "${green}V2node 配置文件生成完成,正在重新启动服务${plain}"
         if [[ x"${release}" == x"alpine" ]]; then
             service v2node restart
@@ -461,12 +494,12 @@ EOF
 
 
 generate_config_file() {
-    # 交互式收集参数，提供示例默认值
+    # 交互式收集参数；示例地址不能作为实际配置使用
     read -rp "面板API地址[格式: https://example.com/]: " api_host
-    api_host=${api_host:-https://example.com/}
     read -rp "节点ID: " node_id
     node_id=${node_id:-1}
-    read -rp "节点通讯密钥: " api_key
+    read -rsp "节点通讯密钥: " api_key
+    printf '\n'
 
     # 生成配置文件（覆盖可能从包中复制的模板）
     generate_v2node_config "$api_host" "$node_id" "$api_key"
@@ -501,9 +534,10 @@ show_usage() {
     echo "v2node disable      - 取消 v2node 开机自启"
     echo "v2node log          - 查看 v2node 日志"
     echo "v2node x25519       - 生成 x25519 密钥"
+    echo "v2node rollback     - 回滚到安装前版本"
     echo "v2node generate     - 生成 v2node 配置文件"
     echo "v2node update       - 更新 v2node"
-    echo "v2node update x.x.x - 安装 v2node 指定版本"
+    echo "v2node update       - 安装 bản personal đã pin"
     echo "v2node install      - 安装 v2node"
     echo "v2node uninstall    - 卸载 v2node"
     echo "v2node version      - 查看 v2node 版本"
@@ -513,7 +547,7 @@ show_usage() {
 show_menu() {
     echo -e "
   ${green}v2node 后端管理脚本，${plain}${red}不适用于docker${plain}
---- https://github.com/wyx2685/v2node ---
+--- https://github.com/Duyvj/v2node (v2node-personal RAM) ---
   ${green}0.${plain} 修改配置
 ————————————————
   ${green}1.${plain} 安装 v2node
@@ -576,6 +610,8 @@ if [[ $# > 0 ]]; then
         "install") check_uninstall 0 && install 0 ;;
         "uninstall") check_install 0 && uninstall 0 ;;
         "version") check_install 0 && show_v2node_version 0 ;;
+        "x25519") check_install 0 && /usr/local/v2node/v2node x25519 ;;
+        "rollback") check_install 0 && /usr/local/bin/v2nodectl rollback ;;
         "update_shell") update_shell ;;
         *) show_usage
     esac

@@ -125,7 +125,7 @@ func dialWebSocket(ctx context.Context, dest net.Destination, streamSettings *in
 		}
 		uri := protocol + "://" + host + wsSettings.GetNormalizedPath()
 
-		conn, err := browser_dialer.DialWS(uri, ed)
+		conn, err := browser_dialer.DialWSContext(ctx, uri, ed)
 		if err != nil {
 			return nil, err
 		}

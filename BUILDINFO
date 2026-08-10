@@ -1,5 +1,5 @@
 product=v2node-personal
-version=v0.4.4-ram1
+version=v0.4.4-ram2
 upstream_tag=v0.4.4
 upstream_commit=2daa9dd4a114aa39294350475defa2b748d595ed
 go=go1.26.1

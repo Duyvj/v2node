@@ -95,27 +95,92 @@ func TestContextIgnoringTaskCannotCreateReplacementGeneration(t *testing.T) {
 	}
 }
 
-func TestTaskTimeoutRequestsReload(t *testing.T) {
+func TestTaskInternalDeadlineExceededDoesNotRequestReload(t *testing.T) {
 	reload := make(chan struct{}, 1)
 	task := &Task{
-		Name:         "timeout",
-		Interval:     2 * time.Millisecond,
+		Name:     "panel-timeout",
+		Interval: time.Hour,
+		ReloadCh: reload,
+		Execute: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				t.Fatalf("scheduler context unexpectedly ended: %v", err)
+			}
+			return context.DeadlineExceeded
+		},
+	}
+
+	if err := task.ExecuteWithTimeout(); err != nil {
+		t.Fatalf("ExecuteWithTimeout() error = %v, want nil for a transient callback deadline", err)
+	}
+	select {
+	case <-reload:
+		t.Fatal("internal deadline error requested a process reload")
+	default:
+	}
+}
+
+func TestTaskStartContinuesAfterCallbackDeadlineExceeded(t *testing.T) {
+	reload := make(chan struct{}, 1)
+	invocations := make(chan int, 2)
+	invocation := 0
+	task := &Task{
+		Name:         "panel-timeout",
+		Interval:     10 * time.Millisecond,
 		ReloadCh:     reload,
 		CloseTimeout: time.Second,
+		Execute: func(context.Context) error {
+			invocation++
+			invocations <- invocation
+			return context.DeadlineExceeded
+		},
+	}
+
+	if err := task.Start(true); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := task.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+
+	for want := 1; want <= 2; want++ {
+		select {
+		case got := <-invocations:
+			if got != want {
+				t.Fatalf("invocation = %d, want %d", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for invocation %d", want)
+		}
+	}
+	if err := task.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reload:
+		t.Fatal("callback-local deadline requested a process reload")
+	default:
+	}
+}
+
+func TestTaskSchedulerTimeoutRequestsReload(t *testing.T) {
+	reload := make(chan struct{}, 1)
+	task := &Task{
+		Name:     "timeout",
+		Interval: 2 * time.Millisecond,
+		ReloadCh: reload,
 		Execute: func(ctx context.Context) error {
 			<-ctx.Done()
 			return ctx.Err()
 		},
 	}
-	if err := task.Start(true); err != nil {
-		t.Fatal(err)
+	if err := task.ExecuteWithTimeout(); err != nil {
+		t.Fatalf("ExecuteWithTimeout() error = %v, want nil", err)
 	}
 	select {
 	case <-reload:
 	case <-time.After(time.Second):
 		t.Fatal("task timeout did not request reload")
-	}
-	if err := task.Close(); err != nil {
-		t.Fatal(err)
 	}
 }

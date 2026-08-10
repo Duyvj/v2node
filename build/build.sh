@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly VERSION="v0.4.4-ram1"
-readonly PACKAGE_LABEL="v0.4.4-ram1"
+readonly VERSION="v0.4.4-ram2"
+readonly PACKAGE_LABEL="v0.4.4-ram2"
 readonly ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 readonly ASSET_DIR="${ROOT}/assets"
 readonly OUT_DIR="${ROOT}/artifacts"
@@ -85,9 +85,11 @@ for target in 'amd64:64' 'arm64:arm64-v8a'; do
   cp "$ASSET_DIR/geoip.dat" "$ASSET_DIR/geosite.dat" "$STAGE/"
   cp "$ROOT/LICENSE" "$STAGE/"
   cp "$ROOT/README.md" "$STAGE/"
+  cp "$ROOT/deploy/v2nodectl.sh" "$STAGE/v2nodectl"
+  cp "$ROOT/script/v2node.sh" "$STAGE/v2node-menu"
   printf '%s\n' "$VERSION" > "$STAGE/VERSION"
   cp "$ROOT/BUILDINFO" "$STAGE/BUILDINFO"
-  chmod 0755 "$STAGE/v2node"
+  chmod 0755 "$STAGE/v2node" "$STAGE/v2nodectl" "$STAGE/v2node-menu"
   find "$STAGE" -maxdepth 1 -type f -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +
   (cd "$STAGE" && find . -maxdepth 1 -type f -printf '%f\n' | sort | \
     zip -X -9 -q "$OUT_DIR/v2node-personal-${PACKAGE_LABEL}-linux-${ASSET_ARCH}.zip" -@)

@@ -30,10 +30,8 @@ func Init() {
 }
 
 type onlineUserState struct {
-	uid         int
-	ips         map[string]struct{}
-	newIPs      int
-	previousIPs int
+	uid int
+	ips map[string]struct{}
 }
 
 type Limiter struct {
@@ -50,12 +48,13 @@ type Limiter struct {
 	aliveMu   sync.RWMutex
 	aliveList map[int]int // panel snapshot: uid -> alive IP count
 
-	onlineMu   sync.Mutex
-	online     map[string]*onlineUserState // current reporting interval
-	previous   map[int]map[string]struct{} // last reported interval by uid
-	trackedIPs int
-	maxPerUser int
-	maxPerNode int
+	onlineMu    sync.Mutex
+	online      map[string]*onlineUserState // current reporting interval
+	previous    map[int]map[string]struct{} // last reported interval by uid
+	trackedIPs  int                         // entries in online
+	previousIPs int                         // entries in previous
+	maxPerUser  int
+	maxPerNode  int
 }
 
 type UserLimitInfo struct {
@@ -145,6 +144,7 @@ func (l *Limiter) clear() {
 	l.online = make(map[string]*onlineUserState)
 	l.previous = make(map[int]map[string]struct{})
 	l.trackedIPs = 0
+	l.previousIPs = 0
 	l.onlineMu.Unlock()
 }
 
@@ -205,6 +205,9 @@ func (l *Limiter) removeOnlineUser(key string, uid int) {
 	if state := l.online[key]; state != nil {
 		l.trackedIPs -= len(state.ips)
 		delete(l.online, key)
+	}
+	if ips := l.previous[uid]; ips != nil {
+		l.previousIPs -= len(ips)
 	}
 	delete(l.previous, uid)
 	l.onlineMu.Unlock()
@@ -277,29 +280,56 @@ func (l *Limiter) trackOnlineIP(taguuid, ip string, uid, deviceLimit int) bool {
 			return false
 		}
 	}
-	wasPreviouslyReported := false
-	if old := l.previous[uid]; old != nil {
-		_, wasPreviouslyReported = old[ip]
+
+	old := l.previous[uid]
+	if _, wasPreviouslyReported := old[ip]; wasPreviouslyReported {
+		// Moving an IP between reporting periods does not consume another cap
+		// slot. Always move it into the current set so it remains reportable;
+		// previously reported IPs must not be accepted without being tracked.
+		delete(old, ip)
+		l.previousIPs--
+		if len(old) == 0 {
+			delete(l.previous, uid)
+		}
+		if state == nil {
+			state = &onlineUserState{uid: uid, ips: make(map[string]struct{})}
+			l.online[taguuid] = state
+		}
+		state.ips[ip] = struct{}{}
+		l.trackedIPs++
+		return false
 	}
-	localNew := 0
-	localPrevious := 0
+
+	userTracked := len(old)
 	if state != nil {
-		localNew = state.newIPs
-		localPrevious = state.previousIPs
+		userTracked += len(state.ips)
 	}
-	// previous contains last interval's IPs not seen yet, while
-	// localPrevious contains last interval's IPs already seen again. Count their
-	// union so a brand-new IP cannot slip through when the panel snapshot lags.
-	knownUnion := len(l.previous[uid]) + localPrevious + localNew
-	occupied := max(alive, knownUnion)
-	if !wasPreviouslyReported && deviceLimit > 0 && occupied >= deviceLimit {
+	if deviceLimit > 0 && max(alive, userTracked) >= deviceLimit {
 		return true
 	}
 
-	perUserFull := state != nil && len(state.ips) >= l.maxPerUser
-	nodeFull := l.trackedIPs >= l.maxPerNode
+	// Current and prior-period entries share the same caps. When a new IP is
+	// actually online, prefer it over one unseen IP from the same user's prior
+	// period. This keeps reports useful during disjoint rotations without ever
+	// retaining two full generations of attacker-controlled strings.
+	retained := l.trackedIPs + l.previousIPs
+	if (userTracked >= l.maxPerUser || retained >= l.maxPerNode) && len(old) > 0 {
+		for staleIP := range old {
+			delete(old, staleIP)
+			break
+		}
+		l.previousIPs--
+		userTracked--
+		retained--
+		if len(old) == 0 {
+			delete(l.previous, uid)
+		}
+	}
+
+	perUserFull := userTracked >= l.maxPerUser
+	nodeFull := retained >= l.maxPerNode
 	if perUserFull || nodeFull {
-		return deviceLimit > 0 && !wasPreviouslyReported
+		return deviceLimit > 0
 	}
 	if state == nil {
 		state = &onlineUserState{uid: uid, ips: make(map[string]struct{})}
@@ -307,15 +337,6 @@ func (l *Limiter) trackOnlineIP(taguuid, ip string, uid, deviceLimit int) bool {
 	}
 	state.ips[ip] = struct{}{}
 	l.trackedIPs++
-	if wasPreviouslyReported {
-		state.previousIPs++
-		delete(l.previous[uid], ip)
-		if len(l.previous[uid]) == 0 {
-			delete(l.previous, uid)
-		}
-	} else {
-		state.newIPs++
-	}
 	return false
 }
 
@@ -323,6 +344,7 @@ func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
 	l.onlineMu.Lock()
 	onlineUsers := make([]panel.OnlineUser, 0, l.trackedIPs)
 	nextPrevious := make(map[int]map[string]struct{}, len(l.online))
+	nextPreviousIPs := 0
 	for _, state := range l.online {
 		ips := nextPrevious[state.uid]
 		if ips == nil {
@@ -330,7 +352,10 @@ func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
 			nextPrevious[state.uid] = ips
 		}
 		for ip := range state.ips {
-			ips[ip] = struct{}{}
+			if _, exists := ips[ip]; !exists {
+				ips[ip] = struct{}{}
+				nextPreviousIPs++
+			}
 			onlineUsers = append(onlineUsers, panel.OnlineUser{UID: state.uid, IP: ip})
 		}
 	}
@@ -339,6 +364,7 @@ func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
 	l.online = make(map[string]*onlineUserState)
 	l.previous = nextPrevious
 	l.trackedIPs = 0
+	l.previousIPs = nextPreviousIPs
 	l.onlineMu.Unlock()
 	return &onlineUsers, nil
 }

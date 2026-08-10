@@ -1,6 +1,7 @@
 package shadowsocks
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -9,15 +10,12 @@ import (
 )
 
 const (
-	// 第二级缓存策略：无上限设计
-	// 业务场景优化：总用户10K-300K，同时在线100-2K
-	//
-	// 无上限设计原理：
-	// - 只保存成功验证的用户，数量 ≤ 同时在线用户数
-	// - 最坏情况：2K用户 × 16字节 = 32KB内存（极其轻量）
-	// - 性能最优：O(实际在线数) vs O(总用户数)，提升5-150倍
-	// - 避免LRU淘汰：确保所有活跃用户都能命中第二级缓存
-	maxSuccessUsers = 0 // 0表示无上限
+	// The second-level cache is only an authentication accelerator. 2,048 users
+	// covers the expected active working set, while a 30-minute idle TTL keeps
+	// ordinary reconnects warm without retaining one-time users indefinitely.
+	// Capacity or TTL misses still fall back to the complete user list.
+	maxSuccessUsers = 2048
+	successUserTTL  = 30 * time.Minute
 
 	// 中转检测阈值：同IP用户数超过此值时，认为是中转场景，禁用该IP的第一级缓存
 	//
@@ -52,7 +50,9 @@ type UserCache struct {
 // successUserCache 成功用户缓存（第二级）- 使用 sync.Map 优化并发性能
 type successUserCache struct {
 	users sync.Map // key: email (string), value: *successUserEntry
-	cap   int      // 容量限制（0表示无上限）
+	mu    sync.Mutex
+	cap   int
+	ttl   time.Duration
 }
 
 // successUserEntry 成功用户条目
@@ -108,7 +108,8 @@ func NewUserCache(capacity int) *UserCache {
 
 	c := &UserCache{
 		successCache: &successUserCache{
-			cap: maxSuccessUsers, // 0表示无上限
+			cap: maxSuccessUsers,
+			ttl: successUserTTL,
 		},
 	}
 	for i := 0; i < 32; i++ {
@@ -120,6 +121,10 @@ func NewUserCache(capacity int) *UserCache {
 		}
 	}
 	return c
+}
+
+func normalizeUserEmail(email string) string {
+	return strings.ToLower(email)
 }
 
 // Get 从缓存获取用户
@@ -163,15 +168,29 @@ func (c *UserCache) Remove(email string) {
 	if c == nil || c.closed.Load() {
 		return
 	}
+	email = normalizeUserEmail(email)
+	if email == "" {
+		return
+	}
 	// 1. 从第一级缓存（IP分片）中移除
 	for i := 0; i < 32; i++ {
 		c.ipShards[i].removeByEmail(email)
 	}
 
-	// 2. 从第二级缓存（成功用户）中移除 - sync.Map 是无锁操作
-	if email != "" {
-		c.successCache.users.Delete(email)
-	}
+	// 2. Remove all matching second-level entries. Keys are normalized on
+	// insertion, and checking the entry as well makes removal robust to entries
+	// created before that invariant was introduced.
+	c.successCache.mu.Lock()
+	c.successCache.users.Range(func(key, value interface{}) bool {
+		entry, ok := value.(*successUserEntry)
+		keyEmail, keyOK := key.(string)
+		if (keyOK && normalizeUserEmail(keyEmail) == email) ||
+			(ok && entry.user != nil && normalizeUserEmail(entry.user.Email) == email) {
+			c.successCache.users.Delete(key)
+		}
+		return true
+	})
+	c.successCache.mu.Unlock()
 }
 
 // Clear 清空所有缓存
@@ -184,10 +203,12 @@ func (c *UserCache) Clear() {
 	}
 
 	// 清空第二级缓存 - sync.Map 使用 Range + Delete
+	c.successCache.mu.Lock()
 	c.successCache.users.Range(func(key, value interface{}) bool {
 		c.successCache.users.Delete(key)
 		return true
 	})
+	c.successCache.mu.Unlock()
 }
 
 // Close releases all cached users and backing shard maps. Unlike Clear, it
@@ -206,10 +227,12 @@ func (c *UserCache) Close() error {
 			shard.list = nil
 			shard.mu.Unlock()
 		}
+		c.successCache.mu.Lock()
 		c.successCache.users.Range(func(key, _ interface{}) bool {
 			c.successCache.users.Delete(key)
 			return true
 		})
+		c.successCache.mu.Unlock()
 	})
 	return nil
 }
@@ -231,6 +254,8 @@ func (s *userCacheShard) get(key string) *protocol.MemoryUser {
 		return nil
 	}
 	entry, ok := s.cache[key]
+	now := time.Now().UnixNano()
+	refresh := ok && now-entry.lastAccess > 5e9
 	s.mu.RUnlock()
 
 	if !ok {
@@ -245,18 +270,9 @@ func (s *userCacheShard) get(key string) *protocol.MemoryUser {
 	// - 高频访问用户（每秒>200次）：写锁竞争降低80%
 	// - 连接稳定性：减少LRU操作导致的短暂阻塞
 	// - 整体性能：缓存命中延迟从35ns降至~25ns
-	now := time.Now().UnixNano()
-	lastAccess := entry.lastAccess
-
 	// 如果超过5秒未更新LRU，才执行更新
-	if now-lastAccess > 5e9 { // 5e9纳秒 = 5秒
-		s.mu.Lock()
-		// 双重检查：其他goroutine可能已经更新过了
-		if !s.closed.Load() && now-entry.lastAccess > 5e9 {
-			s.list.moveToFront(entry.node)
-			entry.lastAccess = now
-		}
-		s.mu.Unlock()
+	if refresh { // 5e9纳秒 = 5秒
+		s.refreshLRU(key, entry, now)
 	}
 
 	return nil // 兼容旧接口，返回nil（已废弃，使用GetMultiUser代替）
@@ -283,21 +299,36 @@ func (s *userCacheShard) getMultiUser(key string) []*protocol.MemoryUser {
 
 	users := make([]*protocol.MemoryUser, len(entry.users))
 	copy(users, entry.users)
+	now := time.Now().UnixNano()
+	refresh := now-entry.lastAccess > 5e9
 	s.mu.RUnlock()
 
 	// 延迟LRU更新（减少锁竞争）
-	now := time.Now().UnixNano()
-	if now-entry.lastAccess > 5e9 { // 5秒
-		s.mu.Lock()
-		// 双重检查：其他goroutine可能已经更新过了
-		if !s.closed.Load() && now-entry.lastAccess > 5e9 {
-			s.list.moveToFront(entry.node)
-			entry.lastAccess = now
-		}
-		s.mu.Unlock()
+	if refresh { // 5秒
+		s.refreshLRU(key, entry, now)
 	}
 
 	return users
+}
+
+// refreshLRU applies a delayed LRU refresh only if entry is still the value
+// currently associated with key. A lookup intentionally releases the shard
+// read lock before this write-side operation; revalidating the map entry here
+// prevents a concurrent delete or eviction from resurrecting a detached node.
+func (s *userCacheShard) refreshLRU(key string, entry *cacheEntry, now int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed.Load() || s.cache == nil || s.list == nil {
+		return
+	}
+	current, ok := s.cache[key]
+	if !ok || current != entry {
+		return
+	}
+	if now-entry.lastAccess > 5e9 {
+		s.list.moveToFront(entry.node)
+		entry.lastAccess = now
+	}
 }
 
 // put 将用户放入分片缓存（兼容旧接口，已废弃）
@@ -322,7 +353,7 @@ func (s *userCacheShard) putMultiUser(key string, user *protocol.MemoryUser) {
 
 		// 检查用户是否已存在
 		for i, existUser := range entry.users {
-			if existUser.Email != "" && existUser.Email == user.Email {
+			if existUser.Email != "" && normalizeUserEmail(existUser.Email) == normalizeUserEmail(user.Email) {
 				// 用户已存在，更新位置和时间
 				entry.users[i] = user
 				entry.lastAccess = time.Now().UnixNano()
@@ -368,22 +399,29 @@ func (s *userCacheShard) removeByEmail(email string) {
 	if s.closed.Load() {
 		return
 	}
+	email = normalizeUserEmail(email)
 
-	// 遍历缓存，找到匹配的用户
+	// A user can be cached under many source addresses in the same shard. Walk
+	// the complete shard and filter every matching occurrence.
 	for key, entry := range s.cache {
-		// 检查用户列表中是否有匹配的用户
-		for i, user := range entry.users {
-			if user.Email == email {
-				// 移除用户
-				entry.users = append(entry.users[:i], entry.users[i+1:]...)
-
-				// 如果用户列表为空，移除整个条目
-				if len(entry.users) == 0 {
-					s.list.remove(entry.node)
-					delete(s.cache, key)
-				}
-				return
+		originalLen := len(entry.users)
+		kept := entry.users[:0]
+		for _, user := range entry.users {
+			if user != nil && normalizeUserEmail(user.Email) == email {
+				continue
 			}
+			kept = append(kept, user)
+		}
+		if len(kept) == originalLen {
+			continue
+		}
+		for i := len(kept); i < originalLen; i++ {
+			entry.users[i] = nil
+		}
+		entry.users = kept
+		if len(entry.users) == 0 {
+			s.list.remove(entry.node)
+			delete(s.cache, key)
 		}
 	}
 }
@@ -487,8 +525,37 @@ func (c *UserCache) GetWithFallback(key string) ([]*protocol.MemoryUser, bool, b
 	return nil, true, false
 }
 
-// GetSuccessUserMap 获取第二级缓存的 sync.Map（零开销，直接引用）
+// RangeSuccessUsers visits non-expired second-level cache entries. Expired
+// entries are removed lazily while the authentication path is already ranging
+// over the cache, avoiding a separate full cleanup scan on every miss.
+func (c *UserCache) RangeSuccessUsers(visit func(*protocol.MemoryUser) bool) {
+	if c == nil || c.closed.Load() || visit == nil {
+		return
+	}
+	now := time.Now().UnixNano()
+	c.successCache.users.Range(func(key, value interface{}) bool {
+		entry, ok := value.(*successUserEntry)
+		if !ok || entry == nil {
+			c.successCache.users.Delete(key)
+			return true
+		}
+		if entry.user == nil || c.successCache.expired(entry, now) {
+			c.successCache.users.CompareAndDelete(key, entry)
+			return true
+		}
+		return visit(entry.user)
+	})
+}
+
+// GetSuccessUserMap returns the second-level map after pruning expired entries.
+// It is retained for cache inspection; authentication uses RangeSuccessUsers.
 func (c *UserCache) GetSuccessUserMap() *sync.Map {
+	if c == nil {
+		return nil
+	}
+	c.successCache.mu.Lock()
+	c.successCache.pruneExpiredLocked(time.Now().UnixNano())
+	c.successCache.mu.Unlock()
 	return &c.successCache.users
 }
 
@@ -504,30 +571,91 @@ func (c *UserCache) PutWithSuccess(key string, user *protocol.MemoryUser) {
 	c.addSuccessUser(user)
 }
 
-// addSuccessUser 添加成功用户到第二级缓存
-// sync.Map 优化：无锁写入，使用 LoadOrStore 保证并发安全
+// addSuccessUser adds or refreshes a second-level cache entry while enforcing
+// the cache's hard capacity at insertion time.
 func (c *UserCache) addSuccessUser(user *protocol.MemoryUser) {
-	if c.closed.Load() || user.Email == "" {
+	if c == nil || user == nil || c.closed.Load() {
+		return
+	}
+	email := normalizeUserEmail(user.Email)
+	if email == "" {
 		return // Email为空无法作为key
 	}
 
 	now := time.Now().UnixNano()
-
-	// 尝试加载已存在的条目
-	if value, loaded := c.successCache.users.LoadOrStore(user.Email, &successUserEntry{
-		user:       user,
-		lastAccess: now,
-	}); loaded {
-		// 用户已存在，使用原子操作更新访问时间（完全无锁）
-		entry := value.(*successUserEntry)
-		atomic.StoreInt64(&entry.lastAccess, now)
-		entry.user = user // 更新用户信息（可能密码变了）
-	}
+	entry := &successUserEntry{user: user, lastAccess: now}
+	successCache := c.successCache
+	successCache.mu.Lock()
+	defer successCache.mu.Unlock()
 	if c.closed.Load() {
-		c.successCache.users.Delete(user.Email)
+		return
 	}
-	// 新用户已通过 LoadOrStore 自动添加，无需额外操作
 
-	// 注意：sync.Map 无上限模式下不做容量限制
-	// 实际使用中成功用户数 ≤ 在线用户数，内存占用极小
+	// Replace the complete entry so lock-free readers never race with an
+	// in-place user pointer update.
+	if _, loaded := successCache.users.Load(email); loaded {
+		successCache.users.Store(email, entry)
+		return
+	}
+
+	count := successCache.pruneExpiredLocked(now)
+	limit := successCache.cap
+	if limit <= 0 {
+		limit = maxSuccessUsers
+	}
+	for count >= limit {
+		if !successCache.evictOldestLocked() {
+			break
+		}
+		count--
+	}
+	successCache.users.Store(email, entry)
+}
+
+func (c *successUserCache) pruneExpiredLocked(now int64) int {
+	count := 0
+	c.users.Range(func(key, value interface{}) bool {
+		entry, ok := value.(*successUserEntry)
+		if !ok || entry == nil || entry.user == nil {
+			c.users.Delete(key)
+			return true
+		}
+		if c.expired(entry, now) {
+			c.users.Delete(key)
+			return true
+		}
+		count++
+		return true
+	})
+	return count
+}
+
+func (c *successUserCache) expired(entry *successUserEntry, now int64) bool {
+	lastAccess := atomic.LoadInt64(&entry.lastAccess)
+	return c.ttl > 0 && now-lastAccess >= int64(c.ttl)
+}
+
+func (c *successUserCache) evictOldestLocked() bool {
+	var oldestKey interface{}
+	var oldestAccess int64
+	found := false
+	c.users.Range(func(key, value interface{}) bool {
+		entry, ok := value.(*successUserEntry)
+		if !ok || entry == nil {
+			oldestKey = key
+			found = true
+			return false
+		}
+		lastAccess := atomic.LoadInt64(&entry.lastAccess)
+		if !found || lastAccess < oldestAccess {
+			oldestKey = key
+			oldestAccess = lastAccess
+			found = true
+		}
+		return true
+	})
+	if found {
+		c.users.Delete(oldestKey)
+	}
+	return found
 }

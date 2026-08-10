@@ -52,7 +52,7 @@ func (v *Validator) initializeIfNeeded() {
 	if v.userCache == nil {
 		// 初始缓存容量优化：
 		// - 一级缓存（IP分片）：2048容量，LRU自动淘汰
-		// - 二级缓存（成功用户）：无上限，保存所有活跃用户
+		// - 二级缓存（成功用户）：保留最近活跃用户，容量和空闲时间均有上限
 		//
 		// 容量选择：2048 足以覆盖大部分场景
 		// - 小规模（<5K用户）：缓存充足
@@ -123,7 +123,7 @@ func (v *Validator) Add(u *protocol.MemoryUser) error {
 
 	// 更新Email索引（如果有Email）
 	if u.Email != "" {
-		v.emailIndex[strings.ToLower(u.Email)] = u
+		v.emailIndex[normalizeUserEmail(u.Email)] = u
 	}
 
 	if !v.behaviorFused {
@@ -147,7 +147,7 @@ func (v *Validator) Del(email string) error {
 		return errors.New("shadowsocks validator is closed")
 	}
 
-	email = strings.ToLower(email)
+	email = normalizeUserEmail(email)
 
 	// 先从Email索引中快速查找 O(1)
 	user, exists := v.emailIndex[email]
@@ -194,7 +194,7 @@ func (v *Validator) GetByEmail(email string) *protocol.MemoryUser {
 		return nil
 	}
 
-	email = strings.ToLower(email)
+	email = normalizeUserEmail(email)
 
 	// 优化：直接从Email索引中获取 O(1)
 	if v.emailIndex != nil {
@@ -245,7 +245,7 @@ func (v *Validator) UpdateUser(email string, newUser *protocol.MemoryUser) error
 		return errors.New("shadowsocks validator is closed")
 	}
 
-	email = strings.ToLower(email)
+	email = normalizeUserEmail(email)
 
 	// 从索引查找旧用户
 	oldUser, exists := v.emailIndex[email]
@@ -264,7 +264,7 @@ func (v *Validator) UpdateUser(email string, newUser *protocol.MemoryUser) error
 	// 更新Email索引
 	delete(v.emailIndex, email)
 	if newUser.Email != "" {
-		v.emailIndex[strings.ToLower(newUser.Email)] = newUser
+		v.emailIndex[normalizeUserEmail(newUser.Email)] = newUser
 	}
 
 	// 清除用户缓存（密码已变更）
@@ -327,6 +327,27 @@ type ValidatorStats struct {
 // cacheKey: 可选的缓存键（通常是源地址 "ip:port"），为空则跳过缓存
 func (v *Validator) Get(bs []byte, command protocol.RequestCommand) (u *protocol.MemoryUser, aead cipher.AEAD, ret []byte, ivLen int32, err error) {
 	return v.GetWithCache(bs, command, "")
+}
+
+// commitCachedAuthentication verifies that a user captured from either cache
+// is still the validator's current user for that email, then refreshes both
+// caches while holding the same read lock. Del and UpdateUser take the write
+// lock, so a revocation either happens before this check (and the stale hit is
+// rejected) or after the refresh (and removes the refreshed entries).
+func (v *Validator) commitCachedAuthentication(cacheKey string, user *protocol.MemoryUser) bool {
+	if user == nil {
+		return false
+	}
+
+	v.RLock()
+	defer v.RUnlock()
+	if v.closed || v.emailIndex == nil || v.emailIndex[normalizeUserEmail(user.Email)] != user {
+		return false
+	}
+	if cacheKey != "" && v.userCache != nil {
+		v.userCache.PutWithSuccess(cacheKey, user)
+	}
+	return true
 }
 
 // GetWithCache 带两级缓存支持的用户验证（优化IP变化场景）
@@ -395,12 +416,9 @@ func (v *Validator) GetWithCache(bs []byte, command protocol.RequestCommand, cac
 
 		// 两级缓存：验证用户列表（无需全局锁）
 		if useSecondCache {
-			// 直接遍历 sync.Map，零拷贝，完全无锁
-			secondCacheMap := v.userCache.GetSuccessUserMap()
+			// 直接遍历未过期的成功用户，零拷贝且无需全局用户锁。
 			var found bool
-			secondCacheMap.Range(func(key, value interface{}) bool {
-				entry := value.(*successUserEntry)
-				successUser := entry.user
+			v.userCache.RangeSuccessUsers(func(successUser *protocol.MemoryUser) bool {
 				if account := successUser.Account.(*MemoryAccount); account.Cipher.IsAEAD() {
 					if len(bs) >= 32 {
 						aeadCipher := account.Cipher.(*AEADCipher)
@@ -429,15 +447,10 @@ func (v *Validator) GetWithCache(bs []byte, command protocol.RequestCommand, cac
 						// 用完立即归还subkey到池
 						putSubkey(subkey)
 
-						if matchErr == nil {
+						if matchErr == nil && v.commitCachedAuthentication(cacheKey, successUser) {
 							// 第二级缓存命中且验证成功
 							u = successUser
 							found = true
-
-							// 更新第一级缓存
-							if cacheKey != "" && v.userCache != nil {
-								v.userCache.PutWithSuccess(cacheKey, successUser)
-							}
 
 							// 防御已启用时才记录成功
 							if v.defenseEnabled && defenseKey != "" && v.attackDefense != nil {
@@ -485,14 +498,9 @@ func (v *Validator) GetWithCache(bs []byte, command protocol.RequestCommand, cac
 						// 用完立即归还subkey到池
 						putSubkey(subkey)
 
-						if matchErr == nil {
+						if matchErr == nil && v.commitCachedAuthentication(cacheKey, successUser) {
 							// 第一级IP缓存命中且验证成功
 							u = successUser
-
-							// 更新第一级缓存
-							if cacheKey != "" && v.userCache != nil {
-								v.userCache.PutWithSuccess(cacheKey, successUser)
-							}
 
 							// 防御已启用时才记录成功
 							if v.defenseEnabled && defenseKey != "" && v.attackDefense != nil {

@@ -103,7 +103,7 @@ func (t *Task) executeWithTimeout(parent context.Context) error {
 	if parent.Err() != nil {
 		return parent.Err()
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		log.Errorf("Task %s execution timed out, reloading", t.Name)
 		if t.ReloadCh == nil {
 			return fmt.Errorf("task %s timed out without a reload channel", t.Name)
@@ -114,7 +114,10 @@ func (t *Task) executeWithTimeout(parent context.Context) error {
 		}
 		return nil
 	}
-	if errors.Is(err, context.Canceled) {
+	// Callback-local cancellations/timeouts (for example Resty request
+	// deadlines) are transient task results. They must neither reload the whole
+	// VPN process nor stop the periodic scheduler.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return nil
 	}
 	return err

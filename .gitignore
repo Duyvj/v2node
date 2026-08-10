@@ -1,6 +1,8 @@
 # Build outputs
 /artifacts/
 /dist/
+/.cache/
+/.tmp-go-cache/
 /v2node
 *.test
 *.out

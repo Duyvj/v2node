@@ -15,6 +15,64 @@
 		let upstreamGetCount = 0;
 		let upstreamWsCount = 0;
 		let upstreamPostCount = 0;
+		let reconnectTimer = null;
+		let reconnectDelay = 250;
+		const reconnectDelayMax = 5000;
+		const tokenRefreshTimeout = 4000;
+		const tokenEndpoint = "/csrf-token";
+
+		function websocketURL(token) {
+			return "ws://" + window.location.host + "/websocket?token=" + encodeURIComponent(token);
+		}
+
+		async function refreshDialerURL() {
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), tokenRefreshTimeout);
+			try {
+				const response = await fetch(tokenEndpoint, {cache: "no-store", signal: controller.signal});
+				if (!response.ok) {
+					throw new Error("Unable to refresh browser dialer token");
+				}
+
+				const token = (await response.text()).trim();
+				if (!token) {
+					throw new Error("Browser dialer returned an empty token");
+				}
+
+				const refreshedURL = websocketURL(token);
+				if (refreshedURL == url) {
+					return false;
+				}
+				url = refreshedURL;
+				return true;
+			} finally {
+				clearTimeout(timeout);
+			}
+		}
+
+		async function recoverConnection() {
+			try {
+				if (await refreshDialerURL()) {
+					reconnectDelay = 250;
+				}
+			} catch (error) {
+				console.warn("Browser dialer token refresh failed", error);
+			}
+			scheduleReconnect();
+		}
+
+		function scheduleReconnect() {
+			if (reconnectTimer !== null || clientIdleCount > 0) {
+				return;
+			}
+
+			const delay = reconnectDelay;
+			reconnectDelay = Math.min(reconnectDelay * 2, reconnectDelayMax);
+			reconnectTimer = setTimeout(() => {
+				reconnectTimer = null;
+				check();
+			}, delay);
+		}
 
 		function prepareRequestInit(extra) {
 			const requestInit = {};
@@ -67,7 +125,24 @@
 			}
 			clientIdleCount += 1;
 			console.log("Prepare", url);
-			let ws = new WebSocket(url);
+			let idle = true;
+			let releaseIdle = function () {
+				if (!idle) {
+					return false;
+				}
+				idle = false;
+				clientIdleCount -= 1;
+				return true;
+			};
+
+			let ws;
+			try {
+				ws = new WebSocket(url);
+			} catch (error) {
+				releaseIdle();
+				recoverConnection();
+				return;
+			}
 			// arraybuffer is significantly faster in chrome than default
 			// blob, tested with chrome 123
 			ws.binaryType = "arraybuffer";
@@ -75,7 +150,11 @@
 			// handshake has completed. do not attempt to modernize it without
 			// double-checking that this continues to work
 			ws.onmessage = function (event) {
-				clientIdleCount -= 1;
+				if (!releaseIdle()) {
+					return;
+				}
+					reconnectDelay = 250;
+				check();
 				let task = JSON.parse(event.data);
 				if (task.method == "WS") {
 					upstreamWsCount += 1;
@@ -193,14 +272,20 @@
 					console.error(`Incorrect task method=${task.method} streamResponse=${task.streamResponse}.`);
 					ws.close();
 				}
-
-				check();
 			};
 			ws.onerror = function (event) {
+				if (releaseIdle()) {
+					recoverConnection();
+				}
 				ws.close();
 			};
+			ws.onclose = function (event) {
+				if (releaseIdle()) {
+					recoverConnection();
+				}
+			};
 		};
-		let checkTask = setInterval(check, 1000);
+		check();
 	</script>
 </body>
 </html>

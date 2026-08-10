@@ -1,7 +1,2 @@
-d293861fad08df0ab4666075c0d79edc4ef7d6473d73cd5ea8b9f0faba674df2  v2node-personal-v0.4.4-ram1-linux-64.zip
-1d9c9288d1c84206d9540ea9b7071b4b321b31a0745edb3218669fd762966b5c  v2node-personal-v0.4.4-ram1-linux-arm64-v8a.zip
-83797719facc092e210f8f8e0e5e0b0bdfe06ac90a3a4a3d6a6ab2d781a917ae  assets/geoip.dat
-b9b5d8ae506f226356f783820c22508e522edd188dfce9cd87d4908621104a47  assets/geosite.dat
-38da98ebafb232bbf17c70f6cab5bb7d2da1be0b6699bfe093f1a5d1ac37ab93  deploy/install.sh
-f462cb59140b9f6ab6dff33b1a9131a1b20082f6337afb0e06e9592da01309a0  deploy/v2nodectl.sh
-38da98ebafb232bbf17c70f6cab5bb7d2da1be0b6699bfe093f1a5d1ac37ab93  script/install.sh
+d7090defddb5261842674dff04f408cec5d99351a667c95013cf6c68d8e41c34  v2node-personal-v0.4.4-ram2-linux-64.zip
+34aeeada5dabbd9f2369cd0ab81995d966d1a2e8c2c63e84d4f95bd8544b90ab  v2node-personal-v0.4.4-ram2-linux-arm64-v8a.zip

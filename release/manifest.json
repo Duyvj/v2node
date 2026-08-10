@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "product": "v2node-personal",
-  "version": "v0.4.4-ram1",
+  "version": "v0.4.4-ram2",
   "source_repo": "https://github.com/wyx2685/v2node",
   "source_tag": "v0.4.4",
   "source_commit": "2daa9dd4a114aa39294350475defa2b748d595ed",
@@ -31,18 +31,18 @@
     }
   ],
   "source_bundle": {
-    "name": "v2node-personal-v0.4.4-ram1-source.zip"
+    "name": "v2node-personal-v0.4.4-ram2-source.zip"
   },
   "artifacts": [
     {
-      "name": "v2node-personal-v0.4.4-ram1-linux-64.zip",
-      "size": 31723849,
-      "sha256": "d293861fad08df0ab4666075c0d79edc4ef7d6473d73cd5ea8b9f0faba674df2"
+      "name": "v2node-personal-v0.4.4-ram2-linux-64.zip",
+      "size": 31738116,
+      "sha256": "d7090defddb5261842674dff04f408cec5d99351a667c95013cf6c68d8e41c34"
     },
     {
-      "name": "v2node-personal-v0.4.4-ram1-linux-arm64-v8a.zip",
-      "size": 29352295,
-      "sha256": "1d9c9288d1c84206d9540ea9b7071b4b321b31a0745edb3218669fd762966b5c"
+      "name": "v2node-personal-v0.4.4-ram2-linux-arm64-v8a.zip",
+      "size": 29360233,
+      "sha256": "34aeeada5dabbd9f2369cd0ab81995d966d1a2e8c2c63e84d4f95bd8544b90ab"
     }
   ]
 }

@@ -88,6 +88,201 @@ func TestNewIPIsRejectedBeforePreviousIPReconnects(t *testing.T) {
 	}
 }
 
+func TestEvictedPriorPeriodIPCannotBypassFullPerUserCap(t *testing.T) {
+	Init()
+	const (
+		tag  = "node-prior-cap"
+		uuid = "limited-user"
+	)
+	l := AddLimiter("vmess", tag, []panel.UserInfo{{Id: 14, Uuid: uuid, DeviceLimit: 10}}, nil, 2, 8)
+	key := format.UserTag(tag, uuid)
+	oldIPs := []string{"192.0.2.1", "192.0.2.2"}
+	for _, ip := range oldIPs {
+		if _, rejected := l.CheckLimit(key, ip, true); rejected {
+			t.Fatalf("initial IP %s was rejected", ip)
+		}
+	}
+	_, _ = l.GetOnlineDevice()
+
+	// A disjoint current set replaces stale prior-period entries while keeping
+	// the combined per-user state at the cap.
+	for _, ip := range []string{"198.51.100.1", "198.51.100.2"} {
+		if _, rejected := l.CheckLimit(key, ip, true); rejected {
+			t.Fatalf("current IP %s was rejected even though a stale slot was available", ip)
+		}
+		assertStoredIPCaps(t, l)
+	}
+	// The prior implementation still considered these IPs privileged and
+	// accepted them without tracking once the current map was full.
+	for _, ip := range oldIPs {
+		if _, rejected := l.CheckLimit(key, ip, true); !rejected {
+			t.Fatalf("prior-period IP %s bypassed the full tracker", ip)
+		}
+	}
+}
+
+func TestPriorPeriodIPMovesIntoCurrentAtNodeCap(t *testing.T) {
+	Init()
+	const (
+		tag      = "node-prior-node-cap"
+		priorIP  = "192.0.2.1"
+		overflow = "198.51.100.3"
+	)
+	users := []panel.UserInfo{
+		{Id: 16, Uuid: "limited-user", DeviceLimit: 10},
+		{Id: 17, Uuid: "unlimited-user"},
+	}
+	l := AddLimiter("vmess", tag, users, nil, 4, 6)
+	limitedKey := format.UserTag(tag, users[0].Uuid)
+	unlimitedKey := format.UserTag(tag, users[1].Uuid)
+	if _, rejected := l.CheckLimit(limitedKey, priorIP, true); rejected {
+		t.Fatal("initial prior-period IP was rejected")
+	}
+	_, _ = l.GetOnlineDevice()
+
+	for _, ip := range []string{"192.0.2.2", "192.0.2.3", "192.0.2.4"} {
+		if _, rejected := l.CheckLimit(limitedKey, ip, true); rejected {
+			t.Fatalf("limited user's current IP %s was rejected", ip)
+		}
+	}
+	for _, ip := range []string{"198.51.100.1", "198.51.100.2", overflow} {
+		if _, rejected := l.CheckLimit(unlimitedKey, ip, true); rejected {
+			t.Fatalf("unlimited user's current IP %s was rejected", ip)
+		}
+		assertStoredIPCaps(t, l)
+	}
+
+	// The node is at its retained-state cap. Re-observing a stored prior IP
+	// must transfer its slot into the current report instead of bypassing the
+	// full current tracker or consuming a seventh slot.
+	if _, rejected := l.CheckLimit(limitedKey, priorIP, true); rejected {
+		t.Fatal("tracked prior-period IP was rejected at the node cap")
+	}
+	assertStoredIPCaps(t, l)
+	online, err := l.GetOnlineDevice()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seenPrior := false
+	seenOverflow := false
+	for _, got := range *online {
+		seenPrior = seenPrior || got.IP == priorIP
+		seenOverflow = seenOverflow || got.IP == overflow
+	}
+	if !seenPrior {
+		t.Fatal("prior-period IP bypassed tracking and was omitted from the current report")
+	}
+	if seenOverflow {
+		t.Fatal("untracked node-cap overflow IP entered the current report")
+	}
+}
+
+func TestDisjointIPRotationsStayWithinPerUserCap(t *testing.T) {
+	Init()
+	const (
+		tag       = "node-disjoint-user"
+		uuid      = "rotating-user"
+		uid       = 15
+		rotations = 128
+		perUser   = 8
+	)
+	l := AddLimiter("vmess", tag, []panel.UserInfo{{Id: uid, Uuid: uuid}}, nil, perUser, 32)
+	key := format.UserTag(tag, uuid)
+
+	for rotation := 0; rotation < rotations; rotation++ {
+		want := make(map[string]struct{}, perUser)
+		for slot := 0; slot < perUser; slot++ {
+			ip := stressIP(198, rotation*perUser+slot)
+			want[ip] = struct{}{}
+			if _, rejected := l.CheckLimit(key, ip, true); rejected {
+				t.Fatalf("rotation %d IP %s was rejected for an unlimited user", rotation, ip)
+			}
+			assertStoredIPCaps(t, l)
+		}
+
+		// Unlimited users remain allowed after the tracker is full, but the
+		// excess address must not enlarge retained state or enter the report.
+		excess := stressIP(203, rotation)
+		if _, rejected := l.CheckLimit(key, excess, true); rejected {
+			t.Fatalf("rotation %d excess IP was rejected for an unlimited user", rotation)
+		}
+		assertStoredIPCaps(t, l)
+
+		online, err := l.GetOnlineDevice()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(*online) != perUser {
+			t.Fatalf("rotation %d reported %d IPs, want %d", rotation, len(*online), perUser)
+		}
+		for _, got := range *online {
+			if got.UID != uid {
+				t.Fatalf("rotation %d reported UID %d, want %d", rotation, got.UID, uid)
+			}
+			if _, ok := want[got.IP]; !ok {
+				t.Fatalf("rotation %d reported stale or excess IP %s", rotation, got.IP)
+			}
+			delete(want, got.IP)
+		}
+		if len(want) != 0 {
+			t.Fatalf("rotation %d omitted %d current IPs", rotation, len(want))
+		}
+		assertStoredIPCaps(t, l)
+	}
+}
+
+func TestDisjointIPRotationsStayWithinNodeCap(t *testing.T) {
+	Init()
+	const (
+		tag       = "node-disjoint-node"
+		rotations = 128
+		perUser   = 3
+		nodeCap   = 7
+	)
+	users := []panel.UserInfo{
+		{Id: 101, Uuid: "user-1"},
+		{Id: 102, Uuid: "user-2"},
+		{Id: 103, Uuid: "user-3"},
+		{Id: 104, Uuid: "overflow-user"},
+	}
+	l := AddLimiter("vmess", tag, users, nil, perUser, nodeCap)
+
+	for rotation := 0; rotation < rotations; rotation++ {
+		want := make(map[string]int, nodeCap)
+		for slot := 0; slot < nodeCap; slot++ {
+			user := users[slot/perUser]
+			ip := stressIP(10, rotation*nodeCap+slot)
+			want[ip] = user.Id
+			if _, rejected := l.CheckLimit(format.UserTag(tag, user.Uuid), ip, true); rejected {
+				t.Fatalf("rotation %d node slot %d was rejected", rotation, slot)
+			}
+			assertStoredIPCaps(t, l)
+		}
+		if _, rejected := l.CheckLimit(format.UserTag(tag, users[3].Uuid), stressIP(172, rotation), true); rejected {
+			t.Fatalf("rotation %d overflow IP was rejected for an unlimited user", rotation)
+		}
+		assertStoredIPCaps(t, l)
+
+		online, err := l.GetOnlineDevice()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(*online) != nodeCap {
+			t.Fatalf("rotation %d reported %d IPs, want node cap %d", rotation, len(*online), nodeCap)
+		}
+		for _, got := range *online {
+			if uid, ok := want[got.IP]; !ok || uid != got.UID {
+				t.Fatalf("rotation %d reported unexpected entry UID=%d IP=%s", rotation, got.UID, got.IP)
+			}
+			delete(want, got.IP)
+		}
+		if len(want) != 0 {
+			t.Fatalf("rotation %d omitted %d current node IPs", rotation, len(want))
+		}
+		assertStoredIPCaps(t, l)
+	}
+}
+
 func TestUniqueIPChurnIsHardBounded(t *testing.T) {
 	Init()
 	const (
@@ -272,4 +467,40 @@ func TestConcurrentDeleteCannotRecreateUserState(t *testing.T) {
 	if _, rejected := l.CheckLimit(key, "192.0.2.1", true); !rejected {
 		t.Fatal("deleted user was accepted")
 	}
+}
+
+func assertStoredIPCaps(t *testing.T, l *Limiter) {
+	t.Helper()
+	l.onlineMu.Lock()
+	defer l.onlineMu.Unlock()
+
+	perUser := make(map[int]int, len(l.online)+len(l.previous))
+	current := 0
+	for _, state := range l.online {
+		current += len(state.ips)
+		perUser[state.uid] += len(state.ips)
+	}
+	prior := 0
+	for uid, ips := range l.previous {
+		prior += len(ips)
+		perUser[uid] += len(ips)
+	}
+	if current != l.trackedIPs {
+		t.Fatalf("current IP accounting mismatch: maps=%d counter=%d", current, l.trackedIPs)
+	}
+	if prior != l.previousIPs {
+		t.Fatalf("prior IP accounting mismatch: maps=%d counter=%d", prior, l.previousIPs)
+	}
+	if current+prior > l.maxPerNode {
+		t.Fatalf("stored node IPs=%d (current=%d prior=%d), cap=%d", current+prior, current, prior, l.maxPerNode)
+	}
+	for uid, count := range perUser {
+		if count > l.maxPerUser {
+			t.Fatalf("stored IPs for UID %d=%d, per-user cap=%d", uid, count, l.maxPerUser)
+		}
+	}
+}
+
+func stressIP(firstOctet, value int) string {
+	return fmt.Sprintf("%d.%d.%d.%d", firstOctet, (value>>16)&255, (value>>8)&255, value&255)
 }

@@ -1,4 +1,4 @@
-# v2node-personal v0.4.4-ram1
+# v2node-personal v0.4.4-ram2
 
 Bản mod RAM-only từ [wyx2685/v2node](https://github.com/wyx2685/v2node)
 `v0.4.4`, dành cho nhiều VPS nhỏ và máy chạy lâu ngày. Protocol, routing,
@@ -28,26 +28,34 @@ Chi tiết kỹ thuật: [MODIFICATIONS.md](MODIFICATIONS.md) và
 [Xray RAM patch](third_party/xray-core/V2NODE_RAM_PATCH.md). Baseline chính xác
 được ghi tại [release/UPSTREAM.md](release/UPSTREAM.md).
 
-## Cài nhanh trên nhiều VPS
+## Cài đè an toàn lên bản gốc
 
-Nếu VPS đã có `/etc/v2node/config.json` hợp lệ:
+Nếu VPS đã cài bản gốc bằng `wyx2685/v2node` và có
+`/etc/v2node/config.json` hợp lệ, chỉ cần chạy:
 
 ```bash
-wget -O /root/v2node-install.sh \
-  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram1/script/install.sh
-chmod 700 /root/v2node-install.sh
-sudo /root/v2node-install.sh
+wget -O /root/v2node-personal-ram2.sh \
+  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram2/script/install.sh
+chmod 700 /root/v2node-personal-ram2.sh
+sudo /root/v2node-personal-ram2.sh
 ```
+
+Installer giữ nguyên từng byte và metadata của config đang dùng, lưu service/binary/
+geodata/menu cũ vào `/var/backups/v2node`, dừng service cũ trước khi đổi file live,
+cài release mới qua symlink nguyên tử rồi health-check trước khi commit. Nếu service
+mới không ổn định, toàn bộ layout bản gốc được khôi phục tự động. Các đường dẫn cũ
+`/usr/local/v2node/v2node`, `geoip.dat`,
+`geosite.dat` và lệnh `v2node` vẫn hoạt động nên panel/VPN không phải đổi cấu hình.
 
 VPS mới có thể truyền file config root-only:
 
 ```bash
 chmod 600 /root/v2node-config.json
-sudo /root/v2node-install.sh --config-file /root/v2node-config.json
+sudo /root/v2node-personal-ram2.sh --config-file /root/v2node-config.json
 ```
 
 Installer tự nhận `amd64/x86_64` hoặc `arm64/aarch64`, dùng đúng asset của tag
-`v0.4.4-ram1` và SHA-256 được nhúng sẵn; không truy vấn release `latest`.
+`v0.4.4-ram2` và SHA-256 được nhúng sẵn; không truy vấn release `latest`.
 
 Checksum chính thức nằm trong `release/SHA256SUMS` và asset `SHA256SUMS` của
 GitHub Release. Installer đã pin cùng các giá trị đó theo từng kiến trúc.
@@ -64,12 +72,18 @@ v2nodectl log
 v2nodectl restart
 v2nodectl version
 v2nodectl rollback
+v2node
 ```
 
 Installer kiểm tra SHA-256, cấu trúc ZIP, kiến trúc ELF, health gate và thực hiện
-rollback giao dịch nếu cài đặt lỗi. Systemd được cấu hình `GOMEMLIMIT`,
-`MemoryHigh`, log rate limit và emergency swap theo RAM/cgroup. Đây là guardrail
-mềm; RAM thực tế vẫn tăng hợp lý theo số connection đang hoạt động.
+rollback giao dịch nếu cài đặt lỗi. Backup được kiểm tra checksum trước khi restore;
+`v2nodectl rollback` cũng khôi phục menu, binary, geodata của bản gốc và snapshot
+`/etc/fstab` nguyên bản nếu giao dịch đã tạo swap. Theo RAM/cgroup hiệu dụng, systemd
+được cấu hình `GOMEMLIMIT` khoảng 45%, `MemoryHigh` 65%, trần cứng `MemoryMax` 80%
+và `MemorySwapMax` 10% (tối thiểu 128 MiB, tối đa 512 MiB), cùng log rate limit và
+emergency swap.
+RAM thực tế vẫn tăng hợp lý theo số connection đang hoạt động;
+nếu chạm trần cứng, systemd khởi động lại service thay vì để cả VPS cạn RAM.
 
 ## Runtime guardrails
 
