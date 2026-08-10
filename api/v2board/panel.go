@@ -19,18 +19,25 @@ type Client struct {
 	APIHost          string
 	Token            string
 	NodeId           int
-	minPollInterval  time.Duration
-	maxPollInterval  time.Duration
 	nodeEtag         string
 	userEtag         string
 	responseBodyHash string
 	UserList         *UserListBody
 	AliveMap         *AliveMap
+	minPollInterval  time.Duration
+	maxPollInterval  time.Duration
+	maxResponseBytes int
+	maxUsers         int
 }
 
-func New(c *conf.NodeConfig, runtime conf.RuntimeConfig) (*Client, error) {
-	runtime.Normalize()
+func New(c *conf.NodeConfig, runtimeConfigs ...conf.RuntimeConfig) (*Client, error) {
+	runtimeConfig := conf.DefaultRuntimeConfig()
+	if len(runtimeConfigs) > 0 {
+		runtimeConfig = runtimeConfigs[0]
+	}
+	runtimeConfig.Normalize()
 	client := resty.New()
+	client.SetResponseBodyLimit(runtimeConfig.MaxPanelResponseBytes)
 	retryCount := conf.DefaultNodeRetryCount
 	if c.RetryCount != nil {
 		retryCount = *c.RetryCount
@@ -58,13 +65,22 @@ func New(c *conf.NodeConfig, runtime conf.RuntimeConfig) (*Client, error) {
 		"token":     c.Key,
 	})
 	return &Client{
-		client:          client,
-		Token:           c.Key,
-		APIHost:         c.APIHost,
-		NodeId:          c.NodeID,
-		minPollInterval: time.Duration(runtime.MinPollIntervalSeconds) * time.Second,
-		maxPollInterval: time.Duration(runtime.MaxPollIntervalSeconds) * time.Second,
-		UserList:        &UserListBody{},
-		AliveMap:        &AliveMap{},
+		client:           client,
+		Token:            c.Key,
+		APIHost:          c.APIHost,
+		NodeId:           c.NodeID,
+		UserList:         &UserListBody{},
+		AliveMap:         &AliveMap{},
+		minPollInterval:  time.Duration(runtimeConfig.MinPollIntervalSeconds) * time.Second,
+		maxPollInterval:  time.Duration(runtimeConfig.MaxPollIntervalSeconds) * time.Second,
+		maxResponseBytes: runtimeConfig.MaxPanelResponseBytes,
+		maxUsers:         runtimeConfig.MaxUsers,
 	}, nil
+}
+
+// Close releases keep-alive connections owned by this panel generation.
+func (c *Client) Close() {
+	if c != nil && c.client != nil && c.client.GetClient() != nil {
+		c.client.GetClient().CloseIdleConnections()
+	}
 }

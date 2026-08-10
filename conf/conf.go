@@ -1,8 +1,10 @@
 package conf
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/spf13/viper"
 )
@@ -15,6 +17,10 @@ type Conf struct {
 	NodeConfigs []NodeConfig  `mapstructure:"Nodes"`
 	PprofPort   int           `mapstructure:"PprofPort"`
 	Runtime     RuntimeConfig `mapstructure:"Runtime"`
+
+	watchMu     sync.Mutex
+	watchCancel context.CancelFunc
+	watchDone   chan struct{}
 }
 
 type LogConfig struct {

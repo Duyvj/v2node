@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,7 +11,6 @@ import (
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/format"
-	"github.com/wyx2685/v2node/core/app/dispatcher"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/infra/conf"
@@ -50,26 +50,22 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 	var user string
 	vc.users.mapLock.Lock()
 	defer vc.users.mapLock.Unlock()
+	var removeErr error
 	for i := range users {
 		user = format.UserTag(tag, users[i].Uuid)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err = userManager.RemoveUser(ctx, user)
 		cancel()
 		if err != nil {
-			return err
+			removeErr = errors.Join(removeErr, fmt.Errorf("remove user %s: %w", user, err))
 		}
+		// The panel is authoritative. Tombstone dispatch immediately even if the
+		// protocol manager reports an error; the controller will replace the
+		// process so no ghost protocol object can remain resident.
 		delete(vc.users.uidMap, user)
-		if v, ok := vc.dispatcher.Counter.Load(tag); ok {
-			tc := v.(*counter.TrafficCounter)
-			tc.Delete(user)
-		}
-		if v, ok := vc.dispatcher.LinkManagers.Load(user); ok {
-			lm := v.(*dispatcher.LinkManager)
-			lm.CloseAll()
-			vc.dispatcher.LinkManagers.Delete(user)
-		}
+		vc.dispatcher.DisableUser(tag, user)
 	}
-	return nil
+	return removeErr
 }
 
 func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserTraffic, error) {
@@ -89,7 +85,6 @@ func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserT
 			up := traffic.UpCounter.Load()
 			down := traffic.DownCounter.Load()
 			if up+down > int64(mintraffic*1000) {
-				// Swap prevents bytes arriving between Load and reset from being lost.
 				up = traffic.UpCounter.Swap(0)
 				down = traffic.DownCounter.Swap(0)
 				trafficSlice = append(trafficSlice, panel.UserTraffic{
@@ -109,11 +104,6 @@ func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserT
 }
 
 func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
-	v.users.mapLock.Lock()
-	defer v.users.mapLock.Unlock()
-	for i := range p.Users {
-		v.users.uidMap[format.UserTag(p.Tag, p.Users[i].Uuid)] = p.Users[i].Id
-	}
 	var users []*protocol.User
 	switch p.NodeInfo.Type {
 	case "vmess":
@@ -136,23 +126,67 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	default:
 		return 0, fmt.Errorf("unsupported node type: %s", p.NodeInfo.Type)
 	}
+	memoryUsers := make([]*protocol.MemoryUser, len(users))
+	emails := make([]string, len(users))
+	batch := make(map[string]struct{}, len(users))
+	for i, user := range users {
+		if _, exists := batch[user.Email]; exists {
+			return 0, fmt.Errorf("duplicate user %s in add batch", user.Email)
+		}
+		batch[user.Email] = struct{}{}
+		memoryUser, err := user.ToMemoryUser()
+		if err != nil {
+			return 0, err
+		}
+		memoryUsers[i] = memoryUser
+		emails[i] = user.Email
+	}
 	man, err := v.GetUserManager(p.Tag)
 	if err != nil {
 		return 0, fmt.Errorf("get user manager error: %s", err)
 	}
-	for _, u := range users {
-		mUser, err := u.ToMemoryUser()
-		if err != nil {
-			return 0, err
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err = man.AddUser(ctx, mUser)
-		cancel()
-		if err != nil {
-			return 0, err
+	v.users.mapLock.Lock()
+	defer v.users.mapLock.Unlock()
+	for _, email := range emails {
+		if _, exists := v.users.uidMap[email]; exists {
+			return 0, fmt.Errorf("user %s already exists", email)
 		}
 	}
+	if err := addMemoryUsers(man, memoryUsers, emails); err != nil {
+		return 0, err
+	}
+	for i, email := range emails {
+		v.users.uidMap[email] = p.Users[i].Id
+		v.dispatcher.EnableUser(email)
+	}
 	return len(users), nil
+}
+
+func addMemoryUsers(manager proxy.UserManager, memoryUsers []*protocol.MemoryUser, emails []string) error {
+	addedEmails := make([]string, 0, len(memoryUsers))
+	for i, memoryUser := range memoryUsers {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := manager.AddUser(ctx, memoryUser)
+		cancel()
+		if err != nil {
+			return errors.Join(err, rollbackAddedUsers(manager, addedEmails))
+		}
+		addedEmails = append(addedEmails, emails[i])
+	}
+	return nil
+}
+
+func rollbackAddedUsers(manager proxy.UserManager, emails []string) error {
+	var rollbackErr error
+	for i := len(emails) - 1; i >= 0; i-- {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := manager.RemoveUser(ctx, emails[i])
+		cancel()
+		if err != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("rollback user %s: %w", emails[i], err))
+		}
+	}
+	return rollbackErr
 }
 
 func buildVmessUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {

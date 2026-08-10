@@ -19,29 +19,35 @@ type Controller struct {
 	tag                     string
 	limiter                 *limiter.Limiter
 	userList                []panel.UserInfo
-	aliveMap                map[int]int
 	conf                    *conf.NodeConfig
+	runtime                 conf.RuntimeConfig
 	info                    *panel.NodeInfo
 	nodeInfoMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
+	started                 bool
 }
 
 // NewController return a Node controller with default parameters.
-func NewController(api *panel.Client, conf *conf.NodeConfig, info *panel.NodeInfo) *Controller {
+func NewController(api *panel.Client, nodeConf *conf.NodeConfig, info *panel.NodeInfo, runtimeConfigs ...conf.RuntimeConfig) *Controller {
+	runtimeConfig := conf.DefaultRuntimeConfig()
+	if len(runtimeConfigs) > 0 {
+		runtimeConfig = runtimeConfigs[0]
+	}
+	runtimeConfig.Normalize()
 	controller := &Controller{
 		apiClient: api,
 		info:      info,
-		conf:      conf,
+		conf:      nodeConf,
+		runtime:   runtimeConfig,
 	}
 	return controller
 }
 
 // Start implement the Start() function of the service interface
-func (c *Controller) Start(x *core.V2Core) error {
+func (c *Controller) Start(x *core.V2Core) (err error) {
 	// Init Core
 	c.server = x
-	var err error
 	// First fetch Node Info
 	node := c.info
 	if node == nil {
@@ -59,15 +65,36 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if len(c.userList) == 0 {
 		return errors.New("add users error: not have any user")
 	}
-	c.aliveMap, err = c.apiClient.GetUserAlive(context.Background())
+	aliveMap, err := c.apiClient.GetUserAlive(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to get user alive list: %s", err)
 	}
 	c.tag = node.Tag
 
 	// add limiter
-	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap)
+	l := limiter.AddLimiter(
+		c.info.Type,
+		c.tag,
+		c.userList,
+		aliveMap,
+		c.runtime.MaxTrackedIPsPerUser,
+		c.runtime.MaxTrackedIPsPerNode,
+	)
 	c.limiter = l
+	nodeAdded := false
+	usersAdded := false
+	defer func() {
+		if err == nil {
+			return
+		}
+		if usersAdded {
+			_ = c.server.DelUsers(c.userList, c.tag, c.info)
+		}
+		if nodeAdded {
+			_ = c.server.DelNode(c.tag)
+		}
+		limiter.DeleteLimiter(c.tag)
+	}()
 	if node.Security == panel.Tls {
 		err = c.requestCert()
 		if err != nil {
@@ -79,6 +106,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if err != nil {
 		return fmt.Errorf("add new node error: %s", err)
 	}
+	nodeAdded = true
 	added, err := c.server.AddUsers(&core.AddUsersParams{
 		Tag:      c.tag,
 		Users:    c.userList,
@@ -87,25 +115,41 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if err != nil {
 		return fmt.Errorf("add users error: %s", err)
 	}
+	usersAdded = true
 	log.WithField("tag", c.tag).Infof("Added %d new users", added)
 	c.info = node
-	c.startTasks(node)
+	if err = c.startTasks(node); err != nil {
+		return fmt.Errorf("start tasks error: %s", err)
+	}
+	c.started = true
 	return nil
 }
 
 // Close implement the Close() function of the service interface
 func (c *Controller) Close() error {
-	limiter.DeleteLimiter(c.tag)
+	var taskErr error
 	if c.nodeInfoMonitorPeriodic != nil {
-		c.nodeInfoMonitorPeriodic.Close()
+		taskErr = errors.Join(taskErr, c.nodeInfoMonitorPeriodic.Close())
 	}
 	if c.userReportPeriodic != nil {
-		c.userReportPeriodic.Close()
+		taskErr = errors.Join(taskErr, c.userReportPeriodic.Close())
 	}
 	if c.renewCertPeriodic != nil {
-		c.renewCertPeriodic.Close()
+		taskErr = errors.Join(taskErr, c.renewCertPeriodic.Close())
+	}
+	if taskErr != nil {
+		return taskErr
+	}
+	limiter.DeleteLimiter(c.tag)
+	if !c.started {
+		c.apiClient.Close()
+		return nil
 	}
 	err := c.server.DelNode(c.tag)
+	c.apiClient.Close()
+	c.started = false
+	c.limiter = nil
+	c.userList = nil
 	if err != nil {
 		return fmt.Errorf("del node error: %s", err)
 	}

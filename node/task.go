@@ -11,7 +11,7 @@ import (
 	vCore "github.com/wyx2685/v2node/core"
 )
 
-func (c *Controller) startTasks(node *panel.NodeInfo) {
+func (c *Controller) startTasks(node *panel.NodeInfo) error {
 	// fetch node info task
 	c.nodeInfoMonitorPeriodic = &task.Task{
 		Name:     "nodeInfoMonitor",
@@ -28,9 +28,14 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	}
 	log.WithField("tag", c.tag).Info("Start monitor node status")
 	// delay to start nodeInfoMonitor
-	_ = c.nodeInfoMonitorPeriodic.Start(false)
+	if err := c.nodeInfoMonitorPeriodic.Start(false); err != nil {
+		return err
+	}
 	log.WithField("tag", c.tag).Info("Start report node status")
-	_ = c.userReportPeriodic.Start(false)
+	if err := c.userReportPeriodic.Start(false); err != nil {
+		_ = c.nodeInfoMonitorPeriodic.Close()
+		return err
+	}
 	if node.Security == panel.Tls {
 		switch c.info.Common.CertInfo.CertMode {
 		case "none", "", "file", "self":
@@ -43,9 +48,14 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 			}
 			log.WithField("tag", c.tag).Info("Start renew cert")
 			// delay to start renewCert
-			_ = c.renewCertPeriodic.Start(true)
+			if err := c.renewCertPeriodic.Start(true); err != nil {
+				_ = c.userReportPeriodic.Close()
+				_ = c.nodeInfoMonitorPeriodic.Close()
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
@@ -73,8 +83,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		} else {
 			log.Panic("Reload failed")
 		}
-		// The replacement process will fetch users and alive state again.
-		return nil
+		return context.Canceled
 	}
 	log.WithField("tag", c.tag).Debug("Node info no change")
 
@@ -108,7 +117,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		c.limiter.SetAliveList(newA)
 	}
 	// node no changed, check users
-	if len(newU) == 0 {
+	if newU == nil {
 		log.WithField("tag", c.tag).Debug("User list no change")
 		return nil
 	}
@@ -121,7 +130,13 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 				"tag": c.tag,
 				"err": err,
 			}).Error("Delete users failed")
-			return nil
+			if c.server.ReloadCh != nil {
+				select {
+				case c.server.ReloadCh <- struct{}{}:
+				default:
+				}
+			}
+			return context.Canceled
 		}
 	}
 	if len(added) > 0 {
@@ -136,7 +151,16 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 				"tag": c.tag,
 				"err": err,
 			}).Error("Add users failed")
-			return nil
+			// AddUsers rolls back the batch, but a protocol manager can itself
+			// fail during rollback. Replace the process so a partially mutated
+			// dependency cannot retain ghost users across future polling cycles.
+			if c.server.ReloadCh != nil {
+				select {
+				case c.server.ReloadCh <- struct{}{}:
+				default:
+				}
+			}
+			return context.Canceled
 		}
 	}
 	if len(added) > 0 || len(deleted) > 0 || len(modified) > 0 {

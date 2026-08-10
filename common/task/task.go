@@ -3,112 +3,166 @@ package task
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 )
 
+const closeWait = 30 * time.Second
+
+// Task runs at most one invocation at a time. Execute is called directly by
+// the scheduler goroutine so a timeout can never orphan another goroutine.
 type Task struct {
 	Name     string
 	Interval time.Duration
 	Execute  func(context.Context) error
-	Access   sync.RWMutex
-	Running  bool
 	ReloadCh chan struct{}
-	Stop     chan struct{}
+	// CloseTimeout is primarily useful for embedding/tests. Zero uses 30s.
+	CloseTimeout time.Duration
+
+	mu      sync.Mutex
+	running bool
+	cancel  context.CancelFunc
+	done    chan struct{}
 }
 
 func (t *Task) Start(first bool) error {
-	t.Access.Lock()
-	if t.Running {
-		t.Access.Unlock()
+	if t.Interval <= 0 {
+		return fmt.Errorf("task %s has invalid interval %s", t.Name, t.Interval)
+	}
+	if t.Execute == nil {
+		return fmt.Errorf("task %s has no execute function", t.Name)
+	}
+
+	t.mu.Lock()
+	if t.running {
+		t.mu.Unlock()
 		return nil
 	}
-	if t.Interval <= 0 {
-		// A malformed panel interval must not become a busy loop.
-		t.Interval = 30 * time.Second
-	}
-	t.Running = true
-	t.Stop = make(chan struct{})
-	stop := t.Stop
-	t.Access.Unlock()
-	go func() {
-		defer func() {
-			t.Access.Lock()
-			if t.Stop == stop {
-				t.Running = false
-			}
-			t.Access.Unlock()
-		}()
-		if first {
-			if err := t.ExecuteWithTimeout(); err != nil {
-				return
-			}
-		}
-		// Create the timer after an optional first run. This avoids a stale
-		// timer event when a first API call takes longer than the interval.
-		timer := time.NewTimer(t.Interval)
-		defer timer.Stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	t.running = true
+	t.cancel = cancel
+	t.done = done
+	t.mu.Unlock()
 
-		for {
-			select {
-			case <-timer.C:
-				// continue
-			case <-stop:
-				return
-			}
-
-			if err := t.ExecuteWithTimeout(); err != nil {
-				log.Errorf("Task %s execution error: %v", t.Name, err)
-				return
-			}
-			timer.Reset(t.Interval)
-		}
-	}()
-
+	go t.run(ctx, done, first)
 	return nil
 }
 
-func (t *Task) ExecuteWithTimeout() error {
-	ctx, cancel := context.WithTimeout(context.Background(), min(5*t.Interval, 5*time.Minute))
-	defer cancel()
-	done := make(chan error, 1)
-
-	go func() {
-		done <- t.Execute(ctx)
+func (t *Task) run(ctx context.Context, done chan struct{}, first bool) {
+	defer func() {
+		t.mu.Lock()
+		if t.done == done {
+			t.running = false
+			t.cancel = nil
+		}
+		t.mu.Unlock()
+		close(done)
 	}()
 
-	select {
-	case <-ctx.Done():
-		log.Errorf("Task %s execution timed out, reloading", t.Name)
-		if t.ReloadCh != nil {
-			select {
-			case t.ReloadCh <- struct{}{}:
-			default:
+	if first {
+		if err := t.executeWithTimeout(ctx); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Errorf("Task %s execution error: %v", t.Name, err)
 			}
-		} else {
-			log.Panic("Reload failed")
+			return
+		}
+	}
+
+	timer := time.NewTimer(t.Interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+
+		if err := t.executeWithTimeout(ctx); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Errorf("Task %s execution error: %v", t.Name, err)
+			}
+			return
+		}
+		timer.Reset(t.Interval)
+	}
+}
+
+func (t *Task) executeWithTimeout(parent context.Context) error {
+	timeout := 5 * time.Minute
+	if t.Interval < time.Minute {
+		timeout = 5 * t.Interval
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	err := t.Execute(ctx)
+	if parent.Err() != nil {
+		return parent.Err()
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		log.Errorf("Task %s execution timed out, reloading", t.Name)
+		if t.ReloadCh == nil {
+			return fmt.Errorf("task %s timed out without a reload channel", t.Name)
+		}
+		select {
+		case t.ReloadCh <- struct{}{}:
+		default:
 		}
 		return nil
-	case err := <-done:
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil
-		}
-		return err
+	}
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
+}
+
+// ExecuteWithTimeout keeps the public helper used by older callers while
+// retaining the single-goroutine execution model.
+func (t *Task) ExecuteWithTimeout() error {
+	if t.Interval <= 0 {
+		return fmt.Errorf("task %s has invalid interval %s", t.Name, t.Interval)
+	}
+	if t.Execute == nil {
+		return fmt.Errorf("task %s has no execute function", t.Name)
+	}
+	return t.executeWithTimeout(context.Background())
+}
+
+// Close cancels the active invocation and joins the scheduler. If Execute
+// ignores cancellation, Close fails and callers must not start a replacement
+// generation; this bounds retention to one task instead of leaking on reload.
+func (t *Task) Close() error {
+	t.mu.Lock()
+	if !t.running {
+		t.mu.Unlock()
+		return nil
+	}
+	cancel := t.cancel
+	done := t.done
+	t.mu.Unlock()
+
+	cancel()
+	wait := t.CloseTimeout
+	if wait <= 0 {
+		wait = closeWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-done:
+		log.Warningf("Task %s stopped", t.Name)
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("task %s did not stop within %s", t.Name, wait)
 	}
 }
 
-func (t *Task) safeStop() {
-	t.Access.Lock()
-	if t.Running {
-		t.Running = false
-		close(t.Stop)
-	}
-	t.Access.Unlock()
-}
-
-func (t *Task) Close() {
-	t.safeStop()
-	log.Warningf("Task %s stopped", t.Name)
+func (t *Task) Running() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.running
 }

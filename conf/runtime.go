@@ -18,6 +18,13 @@ type RuntimeConfig struct {
 	BufferSizeKB int `mapstructure:"BufferSizeKB"`
 	// Optional Go runtime memory limit, e.g. "448MiB". Empty leaves GOMEMLIMIT/default intact.
 	MemoryLimit string `mapstructure:"MemoryLimit"`
+	// Bound the transient online-IP set. Unlimited users continue to connect
+	// after a cap is reached, but excess IPs are not retained for reporting.
+	MaxTrackedIPsPerUser int `mapstructure:"MaxTrackedIPsPerUser"`
+	MaxTrackedIPsPerNode int `mapstructure:"MaxTrackedIPsPerNode"`
+	// Bound panel-controlled response allocations, including streamed user lists.
+	MaxPanelResponseBytes int `mapstructure:"MaxPanelResponseBytes"`
+	MaxUsers              int `mapstructure:"MaxUsers"`
 }
 
 func DefaultRuntimeConfig() RuntimeConfig {
@@ -25,6 +32,10 @@ func DefaultRuntimeConfig() RuntimeConfig {
 		MinPollIntervalSeconds: 30,
 		MaxPollIntervalSeconds: 3600,
 		BufferSizeKB:           64,
+		MaxTrackedIPsPerUser:   256,
+		MaxTrackedIPsPerNode:   32768,
+		MaxPanelResponseBytes:  16 * 1024 * 1024,
+		MaxUsers:               100000,
 	}
 }
 
@@ -50,6 +61,36 @@ func (r *RuntimeConfig) Normalize() {
 	}
 	if r.BufferSizeKB > 512 {
 		r.BufferSizeKB = 512
+	}
+	if r.MaxTrackedIPsPerUser <= 0 {
+		r.MaxTrackedIPsPerUser = defaults.MaxTrackedIPsPerUser
+	}
+	if r.MaxTrackedIPsPerUser > 65536 {
+		r.MaxTrackedIPsPerUser = 65536
+	}
+	if r.MaxTrackedIPsPerNode <= 0 {
+		r.MaxTrackedIPsPerNode = defaults.MaxTrackedIPsPerNode
+	}
+	if r.MaxTrackedIPsPerNode < r.MaxTrackedIPsPerUser {
+		r.MaxTrackedIPsPerNode = r.MaxTrackedIPsPerUser
+	}
+	if r.MaxTrackedIPsPerNode > 1_000_000 {
+		r.MaxTrackedIPsPerNode = 1_000_000
+	}
+	if r.MaxPanelResponseBytes <= 0 {
+		r.MaxPanelResponseBytes = defaults.MaxPanelResponseBytes
+	}
+	if r.MaxPanelResponseBytes < 64*1024 {
+		r.MaxPanelResponseBytes = 64 * 1024
+	}
+	if r.MaxPanelResponseBytes > 256*1024*1024 {
+		r.MaxPanelResponseBytes = 256 * 1024 * 1024
+	}
+	if r.MaxUsers <= 0 {
+		r.MaxUsers = defaults.MaxUsers
+	}
+	if r.MaxUsers > 1_000_000 {
+		r.MaxUsers = 1_000_000
 	}
 	if r.MemoryLimit != "" {
 		r.MemoryLimit = strings.TrimSpace(r.MemoryLimit)

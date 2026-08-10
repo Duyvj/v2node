@@ -10,7 +10,9 @@ import (
 func TestRuntimeConfigNormalizeAndClamp(t *testing.T) {
 	r := RuntimeConfig{}
 	r.Normalize()
-	if r.MinPollIntervalSeconds != 30 || r.MaxPollIntervalSeconds != 3600 || r.BufferSizeKB != 64 {
+	if r.MinPollIntervalSeconds != 30 || r.MaxPollIntervalSeconds != 3600 || r.BufferSizeKB != 64 ||
+		r.MaxTrackedIPsPerUser != 256 || r.MaxTrackedIPsPerNode != 32768 ||
+		r.MaxPanelResponseBytes != 16*1024*1024 || r.MaxUsers != 100000 {
 		t.Fatalf("unexpected defaults: %+v", r)
 	}
 	if got := r.ClampPollInterval(0); got != 30*time.Second {
@@ -30,7 +32,9 @@ func TestLoadConfigKeepsRuntimeDefaultsWhenOmitted(t *testing.T) {
 	if err := c.LoadFromPath(path); err != nil {
 		t.Fatal(err)
 	}
-	if c.Runtime.BufferSizeKB != 64 || c.Runtime.MinPollIntervalSeconds != 30 {
+	if c.Runtime.BufferSizeKB != 64 || c.Runtime.MinPollIntervalSeconds != 30 ||
+		c.Runtime.MaxTrackedIPsPerUser != 256 || c.Runtime.MaxTrackedIPsPerNode != 32768 ||
+		c.Runtime.MaxPanelResponseBytes != 16*1024*1024 || c.Runtime.MaxUsers != 100000 {
 		t.Fatalf("runtime defaults lost during unmarshal: %+v", c.Runtime)
 	}
 }

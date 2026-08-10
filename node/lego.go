@@ -8,9 +8,11 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"net/http"
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"encoding/json"
@@ -27,9 +29,12 @@ import (
 )
 
 type Lego struct {
-	client *lego.Client
-	config *panel.CertInfo
+	client     *lego.Client
+	httpClient *http.Client
+	config     *panel.CertInfo
 }
+
+var dnsEnvMu sync.Mutex
 
 func NewLego(config *panel.CertInfo) (*Lego, error) {
 	user, err := NewLegoUser(path.Join(path.Dir(config.CertFile),
@@ -40,20 +45,40 @@ func NewLego(config *panel.CertInfo) (*Lego, error) {
 		return nil, fmt.Errorf("create user error: %s", err)
 	}
 	c := lego.NewConfig(user)
+	configureLegoHTTPClient(c.HTTPClient)
 	c.Certificate.KeyType = certcrypto.RSA2048
 	client, err := lego.NewClient(c)
 	if err != nil {
 		return nil, err
 	}
 	l := Lego{
-		client: client,
-		config: config,
+		client:     client,
+		httpClient: c.HTTPClient,
+		config:     config,
 	}
 	err = l.SetProvider()
 	if err != nil {
+		l.Close()
 		return nil, fmt.Errorf("set provider error: %s", err)
 	}
 	return &l, nil
+}
+
+func configureLegoHTTPClient(client *http.Client) {
+	if client == nil {
+		return
+	}
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		transport.IdleConnTimeout = 30 * time.Second
+		transport.MaxIdleConns = 8
+		transport.MaxIdleConnsPerHost = 2
+	}
+}
+
+func (l *Lego) Close() {
+	if l != nil && l.httpClient != nil {
+		l.httpClient.CloseIdleConnections()
+	}
 }
 
 func checkPath(p string) error {
@@ -74,10 +99,26 @@ func (l *Lego) SetProvider() error {
 			return err
 		}
 	case "dns":
+		dnsEnvMu.Lock()
+		previous := make(map[string]*string, len(l.config.DNSEnv))
 		for k, v := range l.config.DNSEnv {
-			os.Setenv(k, v)
+			if old, ok := os.LookupEnv(k); ok {
+				oldCopy := old
+				previous[k] = &oldCopy
+			} else {
+				previous[k] = nil
+			}
+			_ = os.Setenv(k, v)
 		}
 		p, err := dns.NewDNSChallengeProviderByName(l.config.Provider)
+		for key, old := range previous {
+			if old == nil {
+				_ = os.Unsetenv(key)
+			} else {
+				_ = os.Setenv(key, *old)
+			}
+		}
+		dnsEnvMu.Unlock()
 		if err != nil {
 			return fmt.Errorf("create dns challenge provider error: %s", err)
 		}
@@ -214,6 +255,8 @@ func registerUser(user *User, path string) error {
 	}
 	user.key = privateKey
 	c := lego.NewConfig(user)
+	configureLegoHTTPClient(c.HTTPClient)
+	defer c.HTTPClient.CloseIdleConnections()
 	client, err := lego.NewClient(c)
 	if err != nil {
 		return fmt.Errorf("create lego client error: %s", err)
@@ -249,8 +292,7 @@ func (u *User) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("marshal json error: %s", err)
 	}
-	data = append(data, '\n')
-	if err = os.WriteFile(path, data, 0600); err != nil {
+	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
 		return err
 	}
 	return os.Chmod(path, 0600)

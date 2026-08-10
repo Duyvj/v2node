@@ -235,4 +235,6 @@ require (
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
 
-replace github.com/xtls/xray-core v1.260711.0 => github.com/wyx2685/xray-core v0.0.0-20260713170150-b17a88f9b46d
+// Local RAM-only patch of the exact upstream-pinned Xray fork. It adds
+// lifecycle stops and hard cache bounds without changing protocol behavior.
+replace github.com/xtls/xray-core v1.260711.0 => ./third_party/xray-core

@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly VERSION="v0.4.4-personal.1"
-readonly PACKAGE_LABEL="v0.4.4-p1"
+readonly VERSION="v0.4.4-ram1"
+readonly PACKAGE_LABEL="v0.4.4-ram1"
 readonly ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 readonly ASSET_DIR="${ROOT}/assets"
 readonly OUT_DIR="${ROOT}/artifacts"
@@ -34,6 +34,43 @@ go mod download
 go mod verify
 go test ./...
 go vet ./...
+XRAY_PACKAGES=(
+  ./app/proxyman/inbound
+  ./app/reverse
+  ./common/net/cnc
+  ./common/signal/pubsub
+  ./common/task
+  ./proxy/anytls
+  ./proxy/shadowsocks
+  ./proxy/vless/outbound
+  ./transport/internet/browser_dialer
+  ./transport/internet/grpc
+  ./transport/internet/grpc/encoding
+  ./transport/internet/hysteria
+  ./transport/internet/splithttp
+  ./transport/internet/tuic
+)
+(cd third_party/xray-core && go mod verify)
+(cd third_party/xray-core && go test "${XRAY_PACKAGES[@]}")
+(cd third_party/xray-core && go vet \
+  ./app/proxyman/inbound \
+  ./app/reverse \
+  ./common/net/cnc \
+  ./common/signal/pubsub \
+  ./common/task \
+  ./proxy/anytls \
+  ./proxy/shadowsocks \
+  ./transport/internet/browser_dialer \
+  ./transport/internet/grpc \
+  ./transport/internet/grpc/encoding \
+  ./transport/internet/hysteria \
+  ./transport/internet/tuic)
+# The pinned upstream protobuf code triggers known copylock warnings unchanged
+# from pristine. Disable only that analyzer so every other splithttp vet check runs.
+(cd third_party/xray-core && go vet -copylocks=false ./transport/internet/splithttp)
+# The pinned VLESS outbound contains two pre-existing unsafe.Pointer warnings.
+# Keep every other vet analyzer enabled for its lifecycle regression package.
+(cd third_party/xray-core && go vet -unsafeptr=false ./proxy/vless/outbound)
 
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR/stage"
@@ -47,6 +84,7 @@ for target in 'amd64:64' 'arm64:arm64-v8a'; do
     -o "$STAGE/v2node" ./
   cp "$ASSET_DIR/geoip.dat" "$ASSET_DIR/geosite.dat" "$STAGE/"
   cp "$ROOT/LICENSE" "$STAGE/"
+  cp "$ROOT/README.md" "$STAGE/"
   printf '%s\n' "$VERSION" > "$STAGE/VERSION"
   cp "$ROOT/BUILDINFO" "$STAGE/BUILDINFO"
   chmod 0755 "$STAGE/v2node"

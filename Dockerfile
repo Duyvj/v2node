@@ -3,11 +3,12 @@ FROM golang:1.26.1-alpine AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./
+COPY third_party/xray-core/go.mod third_party/xray-core/go.sum ./third_party/xray-core/
 ENV CGO_ENABLED=0 GOEXPERIMENT=jsonv2 GOTOOLCHAIN=local
 RUN go mod download && go mod verify
 
 COPY . .
-ARG VERSION=v0.4.4-personal.1
+ARG VERSION=v0.4.4-ram1
 RUN go build -trimpath -buildvcs=false \
     -ldflags "-s -w -buildid= -X github.com/wyx2685/v2node/cmd.version=${VERSION}" \
     -o /out/v2node ./

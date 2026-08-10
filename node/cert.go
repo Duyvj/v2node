@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -16,11 +17,18 @@ import (
 	"github.com/wyx2685/v2node/common/file"
 )
 
-func (c *Controller) renewCertTask(_ context.Context) error {
+func (c *Controller) renewCertTask(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	l, err := NewLego(c.info.Common.CertInfo)
 	if err != nil {
 		log.WithField("tag", c.tag).Info("new lego error: ", err)
 		return nil
+	}
+	defer l.Close()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	err = l.RenewCert()
 	if err != nil {
@@ -49,6 +57,7 @@ func (c *Controller) requestCert() error {
 		if err != nil {
 			return fmt.Errorf("create lego object error: %s", err)
 		}
+		defer l.Close()
 		err = l.CreateCert()
 		if err != nil {
 			return fmt.Errorf("create lego cert error: %s", err)
@@ -96,14 +105,20 @@ func generateSelfSslCertificate(domain, certPath, keyPath string) error {
 		Type:  "CERTIFICATE",
 		Bytes: cert,
 	})
-	if err = os.WriteFile(certPath, certPEM, 0644); err != nil {
+	if certPEM == nil {
+		return errors.New("encode certificate PEM")
+	}
+	if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
 		return err
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "EC PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(key),
 	})
-	if err = os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+	if keyPEM == nil {
+		return errors.New("encode private key PEM")
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
 		return err
 	}
 	return os.Chmod(keyPath, 0600)

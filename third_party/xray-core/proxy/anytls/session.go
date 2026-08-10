@@ -1,0 +1,812 @@
+package anytls
+
+import (
+	"context"
+	"crypto/md5"
+	"encoding/binary"
+	"encoding/hex"
+	"io"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+
+	M "github.com/sagernet/sing/common/metadata"
+	"github.com/sagernet/sing/common/uot"
+	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/net"
+	sessionctx "github.com/xtls/xray-core/common/session"
+	"github.com/xtls/xray-core/common/singbridge"
+	"github.com/xtls/xray-core/features/routing"
+	"github.com/xtls/xray-core/transport"
+	"github.com/xtls/xray-core/transport/internet/stat"
+)
+
+type session struct {
+	isClient bool
+	conn     stat.Connection
+	br       *buf.BufferedReader
+	bw       *buf.BufferedWriter
+	fw       *frameWriter
+
+	writeMu sync.Mutex
+
+	streamsMu sync.Mutex
+	streams   map[uint32]*stream
+
+	peerVersion byte
+	errCh       chan error
+	closed      atomic.Bool
+	seq         uint64
+
+	server           *Server
+	dispatcher       routing.Dispatcher
+	handshakeDone    bool
+	clientPaddingMD5 string
+	noTLS            bool
+
+	client       *Client
+	nextSID      atomic.Uint32
+	pktCounter   atomic.Uint32
+	settingsSent bool
+
+	schemeMu      sync.RWMutex
+	paddingScheme *paddingScheme
+
+	synAckMu sync.Mutex
+	synAckCh map[uint32]chan error
+
+	activeStreams atomic.Int32
+	idleSinceNano atomic.Int64
+	inIdlePool    atomic.Bool
+	dieHook       func()
+}
+
+// A remote peer can send SYN frames without ever completing them. Keep that
+// protocol state bounded per inbound connection.
+const maxInboundStreamsPerSession = 1024
+
+// addClientStream serializes stream admission with close. In particular, close
+// sets closed before clearing streams, so checking closed outside streamsMu
+// would allow a racing opener to assign into the nil map left by close.
+func (s *session) addClientStream(st *stream) bool {
+	s.streamsMu.Lock()
+	defer s.streamsMu.Unlock()
+
+	if s.closed.Load() {
+		return false
+	}
+	if s.streams == nil {
+		s.streams = make(map[uint32]*stream)
+	}
+	s.streams[st.sid] = st
+	s.activeStreams.Add(1)
+	s.inIdlePool.Store(false)
+	return true
+}
+
+func (s *session) addInboundStream(sid uint32) bool {
+	s.streamsMu.Lock()
+	defer s.streamsMu.Unlock()
+
+	if s.closed.Load() {
+		return false
+	}
+	if _, found := s.streams[sid]; found {
+		return true
+	}
+	if len(s.streams) >= maxInboundStreamsPerSession {
+		return false
+	}
+	if s.streams == nil {
+		s.streams = make(map[uint32]*stream)
+	}
+	s.streams[sid] = &stream{sid: sid}
+	return true
+}
+
+func (s *session) dispatchContext(ctx context.Context, st *stream) context.Context {
+	if st.dispatchCtx != nil {
+		return st.dispatchCtx
+	}
+	dispatchCtx := sessionctx.SubContextFromMuxInbound(ctx)
+	if s.noTLS {
+		if content := sessionctx.ContentFromContext(dispatchCtx); content != nil {
+			content.SetAttribute("anytls", "notls")
+		}
+	}
+	st.dispatchCtx = dispatchCtx
+	return dispatchCtx
+}
+
+func releaseSplitFrameBody(first *buf.Buffer, tail buf.MultiBuffer) {
+	first.Release()
+	buf.ReleaseMulti(tail)
+}
+
+func (s *session) handleNewStream(ctx context.Context, st *stream, body buf.MultiBuffer) error {
+	var first *buf.Buffer
+	body, first = buf.SplitFirst(body)
+	if first == nil {
+		return errors.New("anytls: missing destination address in PSH")
+	}
+
+	addr, err := M.SocksaddrSerializer.ReadAddrPort(first)
+	if err != nil {
+		releaseSplitFrameBody(first, body)
+		return err
+	}
+	if !first.IsEmpty() {
+		body = append(buf.MultiBuffer{first}, body...)
+		first = nil
+	} else {
+		first.Release()
+	}
+	dest, err := singbridge.ToDestination(addr, net.Network_TCP)
+	if err != nil {
+		buf.ReleaseMulti(body)
+		return errors.New("anytls: invalid destination address in SYN")
+	}
+
+	dispatchCtx := s.dispatchContext(ctx, st)
+
+	if dest.Address.String() == "sp.v2.udp-over-tcp.arpa" {
+		st.isUDP = true
+		if err := s.sendFrame(newFrame(cmdSYNACK, st.sid)); err != nil {
+			buf.ReleaseMulti(body)
+			errors.LogWarning(ctx, "anytls: UDP SYNACK send error, streamId=", st.sid, " err=", err)
+			return err
+		}
+		if !body.IsEmpty() {
+			return s.handleFirstUDPFrame(dispatchCtx, st, body)
+		}
+		return nil
+	} else if strings.Contains(dest.Address.String(), "udp-over-tcp.arpa") {
+		errors.LogWarning(ctx, "anytls: unsupported UDP destination: "+dest.Address.String())
+		buf.ReleaseMulti(body)
+		_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+		s.finishStream(st.sid, nil)
+		return nil
+	}
+
+	l, err := s.dispatcher.Dispatch(dispatchCtx, dest)
+	if err != nil {
+		errors.LogWarning(ctx, "anytls: new stream dispatcher error, streamId=", st.sid, " err=", err)
+		buf.ReleaseMulti(body)
+		_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+		s.finishStream(st.sid, err)
+		return nil
+	}
+	st.link = l
+
+	if err := s.sendFrame(newFrame(cmdSYNACK, st.sid)); err != nil {
+		buf.ReleaseMulti(body)
+		errors.LogWarning(ctx, "anytls: new stream SYNACK send error, streamId=", st.sid, " err=", err)
+		return err
+	}
+	if !body.IsEmpty() {
+		if err := st.link.Writer.WriteMultiBuffer(body); err != nil {
+			return err
+		}
+	}
+
+	go s.pumpDownlink(st.sid, l)
+	return nil
+}
+
+func (s *session) handleFirstUDPFrame(ctx context.Context, st *stream, body buf.MultiBuffer) error {
+	if st.link == nil {
+		var first *buf.Buffer
+		body, first = buf.SplitFirst(body)
+		if first == nil {
+			errors.LogWarning(ctx, "anytls: UDP missing request data")
+			_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+			s.finishStream(st.sid, nil)
+			return nil
+		}
+		request, err := uot.ReadRequest(first)
+		if err != nil {
+			releaseSplitFrameBody(first, body)
+			errors.LogWarning(ctx, "anytls: UDP failed to parse request:", err)
+			_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+			s.finishStream(st.sid, nil)
+			return nil
+		}
+		st.udpIsConnect = request.IsConnect
+		requestDest, err := singbridge.ToDestination(request.Destination, net.Network_UDP)
+		if err != nil {
+			releaseSplitFrameBody(first, body)
+			errors.LogWarning(ctx, "anytls: UDP invalid destination, streamId=", st.sid, " err=", err)
+			_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+			s.finishStream(st.sid, nil)
+			return nil
+		}
+		link, err := s.dispatcher.Dispatch(s.dispatchContext(ctx, st), requestDest)
+		if err != nil {
+			releaseSplitFrameBody(first, body)
+			errors.LogWarning(ctx, "anytls: UDP dispatcher error, streamId=", st.sid, " err=", err)
+			_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+			s.finishStream(st.sid, nil)
+			return nil
+		}
+
+		st.link = link
+		st.udpTarget = &requestDest
+
+		if !first.IsEmpty() {
+			if request.IsConnect {
+				var length uint16
+				if err := binary.Read(first, binary.BigEndian, &length); err != nil {
+					releaseSplitFrameBody(first, body)
+					errors.LogWarning(ctx, "anytls: UDP packet too short")
+					_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+					s.finishStream(st.sid, nil)
+					return nil
+				}
+			} else {
+				dest, err := uot.AddrParser.ReadAddrPort(first)
+				if err != nil {
+					releaseSplitFrameBody(first, body)
+					errors.LogWarning(ctx, "anytls: UDP packet missing destination address")
+					_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+					s.finishStream(st.sid, nil)
+					return nil
+				}
+				requestDest, err := singbridge.ToDestination(dest, net.Network_UDP)
+				if err != nil {
+					releaseSplitFrameBody(first, body)
+					errors.LogWarning(ctx, "anytls: UDP packet has invalid destination address")
+					_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+					s.finishStream(st.sid, nil)
+					return nil
+				}
+				if requestDest.String() != st.udpTarget.String() {
+					releaseSplitFrameBody(first, body)
+					errors.LogWarning(ctx, "anytls: UDP packet destination does not match the first packet")
+					_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+					s.finishStream(st.sid, nil)
+					return nil
+				}
+				var length uint16
+				if err := binary.Read(first, binary.BigEndian, &length); err != nil {
+					releaseSplitFrameBody(first, body)
+					errors.LogWarning(ctx, "anytls: UDP packet too short")
+					_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+					s.finishStream(st.sid, nil)
+					return nil
+				}
+			}
+			body = append(buf.MultiBuffer{first}, body...)
+			first = nil
+		} else {
+			first.Release()
+		}
+
+		if !body.IsEmpty() {
+			if err := st.link.Writer.WriteMultiBuffer(body); err != nil {
+				return err
+			}
+		}
+
+		go s.pumpUoTDownlink(st.sid, link, request.IsConnect, request.Destination)
+		return nil
+	}
+
+	if err := st.link.Writer.WriteMultiBuffer(body); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *session) handleUDPFrame(ctx context.Context, st *stream, body buf.MultiBuffer) error {
+	if st.link == nil {
+		buf.ReleaseMulti(body)
+		errors.LogWarning(ctx, "anytls: UDP stream without link, streamId=", st.sid)
+		return errors.New("anytls: UDP stream without link")
+	}
+	var first *buf.Buffer
+	body, first = buf.SplitFirst(body)
+	if first == nil {
+		return errors.New("anytls: missing destination address in PSH")
+	}
+	if st.udpIsConnect {
+		var length uint16
+		if err := binary.Read(first, binary.BigEndian, &length); err != nil {
+			releaseSplitFrameBody(first, body)
+			return errors.New("anytls: UDP packet too short")
+		}
+		if first.IsEmpty() {
+			first.Release()
+			first = nil
+		}
+		if first != nil {
+			body = append(buf.MultiBuffer{first}, body...)
+		}
+		if err := st.link.Writer.WriteMultiBuffer(body); err != nil {
+			return err
+		}
+	} else {
+		dest, err := uot.AddrParser.ReadAddrPort(first)
+		if err != nil {
+			releaseSplitFrameBody(first, body)
+			errors.LogWarning(ctx, "anytls: UDP packet missing destination address")
+			_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+			s.finishStream(st.sid, nil)
+			return nil
+		}
+		requestDest, err := singbridge.ToDestination(dest, net.Network_UDP)
+		if err != nil {
+			releaseSplitFrameBody(first, body)
+			errors.LogWarning(ctx, "anytls: UDP failed to parse request:", err)
+			_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+			s.finishStream(st.sid, nil)
+			return nil
+		}
+
+		if st.udpTarget == nil || st.udpTarget.String() != requestDest.String() {
+			oldLink := st.link
+			link, err := s.dispatcher.Dispatch(s.dispatchContext(ctx, st), requestDest)
+			if err != nil {
+				releaseSplitFrameBody(first, body)
+				errors.LogWarning(ctx, "anytls: UDP dispatcher error, streamId=", st.sid, " err=", err)
+				_ = s.sendFrame(newFrame(cmdFIN, st.sid))
+				s.finishStream(st.sid, nil)
+				return nil
+			}
+
+			st.link = link
+			st.udpTarget = &requestDest
+			if oldLink != nil {
+				common.Close(oldLink.Writer)
+				common.Close(oldLink.Reader)
+			}
+			go s.pumpUoTDownlink(st.sid, link, st.udpIsConnect, dest)
+		}
+		var length uint16
+		if err := binary.Read(first, binary.BigEndian, &length); err != nil {
+			releaseSplitFrameBody(first, body)
+			return errors.New("anytls: UDP packet too short")
+		}
+		if !first.IsEmpty() {
+			body = append(buf.MultiBuffer{first}, body...)
+		} else {
+			first.Release()
+		}
+		if err := st.link.Writer.WriteMultiBuffer(body); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *session) pumpDownlink(sid uint32, link *transport.Link) {
+	defer func() {
+		s.finishStream(sid, nil)
+		if !s.isClosed() {
+			_ = s.sendFrame(newFrame(cmdFIN, sid))
+		}
+	}()
+
+	for {
+		mb, err := link.Reader.ReadMultiBuffer()
+		if err != nil {
+			break
+		}
+
+		if err := s.sendStreamData(sid, mb, 0); err != nil {
+			return
+		}
+	}
+}
+
+func (s *session) pumpUoTDownlink(sid uint32, link *transport.Link, isConnect bool, dest M.Socksaddr) {
+	defer func() {
+		s.finishStream(sid, nil)
+		if !s.isClosed() {
+			_ = s.sendFrame(newFrame(cmdFIN, sid))
+		}
+	}()
+
+	for {
+		mb, err := link.Reader.ReadMultiBuffer()
+		if err != nil {
+			break
+		}
+		length := mb.Len()
+		if isConnect {
+			b := buf.New()
+			p := b.Extend(2)
+			binary.BigEndian.PutUint16(p, uint16(length))
+			mb = append(buf.MultiBuffer{b}, mb...)
+			if err := s.sendStreamData(sid, mb, 0); err != nil {
+				return
+			}
+		} else {
+			b1 := buf.New()
+			uot.AddrParser.WriteAddrPort(b1, dest)
+			b2 := buf.New()
+			p := b2.Extend(2)
+			binary.BigEndian.PutUint16(p, uint16(length))
+			mb = append(buf.MultiBuffer{b1, b2}, mb...)
+			if err := s.sendStreamData(sid, mb, 0); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *session) isClosed() bool {
+	return s.closed.Load()
+}
+
+func (s *session) close(err error) {
+	if !s.closed.CompareAndSwap(false, true) {
+		return
+	}
+	if err != nil {
+		select {
+		case s.errCh <- err:
+		default:
+		}
+	}
+	_ = s.conn.Close()
+
+	s.streamsMu.Lock()
+	streams := make([]*stream, 0, len(s.streams))
+	for _, st := range s.streams {
+		streams = append(streams, st)
+	}
+	s.streams = nil
+	s.streamsMu.Unlock()
+
+	for _, st := range streams {
+		st.close(err)
+	}
+	if s.dieHook != nil {
+		s.dieHook()
+	}
+}
+
+func (s *session) finishStream(sid uint32, err error) {
+	s.streamsMu.Lock()
+	st := s.streams[sid]
+	if st != nil {
+		delete(s.streams, sid)
+		if len(s.streams) == 0 && !s.closed.Load() {
+			// Drop buckets grown by a completed burst of streams.
+			s.streams = make(map[uint32]*stream)
+		}
+	}
+	s.streamsMu.Unlock()
+
+	if st == nil {
+		return
+	}
+
+	if s.client != nil {
+		s.activeStreams.Add(-1)
+	}
+	st.close(err)
+}
+
+func (s *session) sendFrame(f *frame) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if err := s.fw.writeFrame(f); err != nil {
+		return err
+	}
+	return s.fw.flush()
+}
+
+func (s *session) sendStreamData(sid uint32, data buf.MultiBuffer, packetIndex uint32) error {
+	defer buf.ReleaseMulti(data)
+	for !data.IsEmpty() {
+		var chunk buf.MultiBuffer
+		data, chunk = buf.SplitSize(data, maxFramePayload)
+		if packetIndex > 0 {
+			b := buf.New()
+			p := b.Extend(7)
+			p[0] = cmdPSH
+			binary.BigEndian.PutUint32(p[1:5], sid)
+			binary.BigEndian.PutUint16(p[5:7], uint16(chunk.Len()))
+			merge, _ := buf.MergeMulti(buf.MultiBuffer{b}, chunk)
+			s.writeMu.Lock()
+			err := s.writePacketWithPadding(packetIndex, merge)
+			s.writeMu.Unlock()
+			if err != nil {
+				buf.ReleaseMulti(merge)
+				return err
+			}
+		} else {
+			s.writeMu.Lock()
+			err := s.fw.writeMultiBuffer(cmdPSH, sid, chunk)
+			if err == nil {
+				err = s.fw.flush()
+			}
+			s.writeMu.Unlock()
+			if err != nil {
+				buf.ReleaseMulti(chunk)
+				return err
+			}
+		}
+
+	}
+	return nil
+}
+
+func (s *session) readLoop(ctx context.Context) error {
+	var head [7]byte
+	for {
+		_, err := io.ReadFull(s.br, head[:])
+		if err != nil {
+			if s.isClosed() {
+				return nil
+			}
+			return err
+		}
+
+		cmd := head[0]
+		sid := binary.BigEndian.Uint32(head[1:5])
+		length := int(binary.BigEndian.Uint16(head[5:7]))
+		//errors.LogDebug(ctx, "anytls: received frame cmd=", cmd, " streamId=", sid, " length=", length)
+		switch cmd {
+		case cmdWaste:
+			if length > 0 {
+				if err := discardBytes(s.br, length); err != nil {
+					return err
+				}
+			}
+		case cmdSettings:
+			if s.isClient {
+				if length > 0 {
+					if err := discardBytes(s.br, length); err != nil {
+						return err
+					}
+				}
+				return errors.New("anytls: unexpected cmdSettings from server")
+			}
+			text, err := readText(s.br, length)
+			if err != nil {
+				return err
+			}
+			if s.handshakeDone {
+				continue
+			}
+			if text != "" {
+				lines := strings.Split(text, "\n")
+				for _, line := range lines {
+					if line == "" {
+						continue
+					}
+					kv := strings.SplitN(line, "=", 2)
+					if len(kv) != 2 {
+						continue
+					}
+					switch kv[0] {
+					case "v":
+						if v, err := strconv.Atoi(kv[1]); err == nil {
+							s.peerVersion = byte(v)
+						}
+					case "padding-md5":
+						s.clientPaddingMD5 = strings.ToLower(kv[1])
+					}
+				}
+			}
+			if err := s.sendFrame(&frame{cmd: cmdServerSettings, sid: 0, data: []byte("v=2")}); err != nil {
+				return err
+			}
+			if s.server != nil && s.server.paddingScheme != "" && s.clientPaddingMD5 != "" {
+				sum := md5.Sum([]byte(s.server.paddingScheme))
+				if strings.ToLower(hex.EncodeToString(sum[:])) != s.clientPaddingMD5 {
+					if err := s.sendFrame(&frame{cmd: cmdUpdatePaddingScheme, sid: 0, data: []byte(s.server.paddingScheme)}); err != nil {
+						return err
+					}
+				}
+			}
+			s.handshakeDone = true
+		case cmdHeartRequest:
+			if length > 0 {
+				if err := discardBytes(s.br, length); err != nil {
+					return err
+				}
+			}
+			if err := s.sendFrame(newFrame(cmdHeartResponse, 0)); err != nil {
+				return err
+			}
+		case cmdHeartResponse:
+			if length > 0 {
+				if err := discardBytes(s.br, length); err != nil {
+					return err
+				}
+			}
+		case cmdSYN:
+			if s.isClient {
+				if length > 0 {
+					if err := discardBytes(s.br, length); err != nil {
+						return err
+					}
+				}
+				return errors.New("anytls: unexpected SYN from server")
+			} else {
+				if !s.handshakeDone {
+					alert := newFrame(cmdAlert, 0)
+					alert.data = []byte("client did not send its settings")
+					_ = s.sendFrame(alert)
+					return errors.New("anytls: client did not send its settings")
+				}
+				if length > 0 {
+					if err := discardBytes(s.br, length); err != nil {
+						return err
+					}
+					errors.LogWarning(ctx, "anytls: unexpected data in SYN, streamId=", sid)
+					if err := s.sendFrame(&frame{cmd: cmdSYNACK, sid: sid, data: []byte("unexpected syn body")}); err != nil {
+						return err
+					}
+					continue
+				}
+				if !s.addInboundStream(sid) {
+					errors.LogWarning(ctx, "anytls: inbound stream limit reached, streamId=", sid)
+					if err := s.sendFrame(&frame{cmd: cmdSYNACK, sid: sid, data: []byte("too many concurrent streams")}); err != nil {
+						return err
+					}
+				}
+			}
+		case cmdPSH:
+			if length <= 0 {
+				err := errors.New("anytls: PSH frame with empty payload, streamId=", sid)
+				s.finishStream(sid, err)
+				return err
+			}
+			body, err := readMultiBufferExact(s.br, length)
+			if err != nil {
+				return err
+			}
+			s.streamsMu.Lock()
+			st := s.streams[sid]
+			s.streamsMu.Unlock()
+			if st == nil {
+				err := errors.New("anytls: received PSH for unknown stream, streamId=", sid)
+				buf.ReleaseMulti(body)
+				s.finishStream(sid, err)
+				return nil
+			} else if st.isUDP && st.link == nil {
+				if err := s.handleFirstUDPFrame(ctx, st, body); err != nil {
+					return err
+				}
+				continue
+			} else if st.isUDP {
+				if err := s.handleUDPFrame(ctx, st, body); err != nil {
+					return err
+				}
+				continue
+			} else if st.link == nil {
+				if err := s.handleNewStream(ctx, st, body); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := st.link.Writer.WriteMultiBuffer(body); err != nil {
+				return err
+			}
+		case cmdFIN:
+			if length > 0 {
+				if err := discardBytes(s.br, length); err != nil {
+					return err
+				}
+			}
+			s.finishStream(sid, nil)
+		case cmdSYNACK:
+			if !s.isClient {
+				if length > 0 {
+					if err := discardBytes(s.br, length); err != nil {
+						return err
+					}
+				}
+				return errors.New("anytls: unexpected SYNACK from client")
+			}
+			s.synAckMu.Lock()
+			ch := s.synAckCh[sid]
+			s.synAckMu.Unlock()
+			if length == 0 {
+				if ch != nil {
+					ch <- nil
+				}
+			} else {
+				bodyText, err := readText(s.br, length)
+				if err != nil {
+					return err
+				}
+				errors.LogWarning(ctx, "anytls: stream handshake rejected, streamId=", sid, " err=", bodyText)
+				s.finishStream(sid, errors.New(bodyText))
+				if ch != nil {
+					ch <- errors.New(bodyText)
+				}
+			}
+		case cmdServerSettings:
+			if !s.isClient {
+				if length > 0 {
+					if err := discardBytes(s.br, length); err != nil {
+						return err
+					}
+				}
+				return errors.New("anytls: unexpected ServerSettings from client")
+			}
+			if length > 0 {
+				bodyText, err := readText(s.br, length)
+				if err != nil {
+					return err
+				}
+				lines := strings.Split(bodyText, "\n")
+				for _, line := range lines {
+					kv := strings.SplitN(line, "=", 2)
+					if len(kv) != 2 {
+						continue
+					}
+					if kv[0] != "v" {
+						continue
+					}
+					if v, err := strconv.Atoi(kv[1]); err == nil {
+						s.peerVersion = byte(v)
+					}
+				}
+			} else {
+				errors.LogWarning(ctx, "anytls: empty ServerSettings from server")
+			}
+		case cmdUpdatePaddingScheme:
+			if !s.isClient {
+				if length > 0 {
+					if err := discardBytes(s.br, length); err != nil {
+						return err
+					}
+				}
+				return errors.New("anytls: unexpected UpdatePaddingScheme from client")
+			}
+			if length > 0 {
+				bodyText, err := readText(s.br, length)
+				if err != nil {
+					return err
+				}
+				scheme, perr := parsePaddingScheme(bodyText)
+				if perr == nil && scheme != nil {
+					s.schemeMu.Lock()
+					s.paddingScheme = scheme
+					s.schemeMu.Unlock()
+				}
+			} else {
+				errors.LogWarning(ctx, "anytls: empty UpdatePaddingScheme from server")
+			}
+		case cmdAlert:
+			if !s.isClient {
+				if length > 0 {
+					if err := discardBytes(s.br, length); err != nil {
+						return err
+					}
+				}
+				return errors.New("anytls: unexpected Alert from client")
+			}
+			var bodyText string
+			if length > 0 {
+				bodyText, err = readText(s.br, length)
+				if err != nil {
+					return err
+				}
+			}
+			alertText := "anytls: server alert"
+			if bodyText != "" {
+				alertText += ": " + bodyText
+			}
+			return errors.New(alertText)
+		default:
+			if length > 0 {
+				if err := discardBytes(s.br, length); err != nil {
+					return err
+				}
+			}
+			errors.LogWarning(ctx, "anytls: unknown cmd=", cmd, " streamId=", sid)
+			return errors.New("anytls: unknown cmd")
+		}
+	}
+}

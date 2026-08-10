@@ -8,14 +8,33 @@
 4. Rollout một batch nhỏ, theo dõi RAM, restart count và report traffic.
 5. Chỉ triển khai toàn fleet khi batch nhỏ ổn định.
 
-Luôn pin tag, URL và SHA-256. Không dùng release `latest`, không tải rồi chạy installer upstream, và không đưa API key vào argv hoặc shell history.
+Luôn pin tag, URL và SHA-256. Không dùng release `latest`, không tải rồi chạy
+installer upstream, và không đưa API key vào argv hoặc shell history. Installer
+`v0.4.4-ram1` đã pin sẵn asset + hash theo kiến trúc nên cùng một lệnh có thể dùng
+cho cả fleet `amd64` và `arm64`.
 
-## Hash release v0.4.4-p1
+## Lệnh cài pin theo tag
+
+```bash
+wget -O /root/v2node-install.sh \
+  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram1/script/install.sh
+chmod 700 /root/v2node-install.sh
+sudo /root/v2node-install.sh
+```
+
+Máy mới chưa có `/etc/v2node/config.json` cần thêm `--config-file` hoặc bộ tham số
+panel an toàn như mô tả trong `README.md`.
+
+## Hash release v0.4.4-ram1
 
 ```text
-amd64  ec72782211e683c1804bb4f56f1cb4240a4e29236491b9c722beb9276299dd2f
-arm64  76d373985fe8695d2612b1de2878d510396b46960ebbf313d4f1eda28f76d490
+amd64  d293861fad08df0ab4666075c0d79edc4ef7d6473d73cd5ea8b9f0faba674df2
+arm64  1d9c9288d1c84206d9540ea9b7071b4b321b31a0745edb3218669fd762966b5c
 ```
+
+Trong canary, theo dõi ít nhất RSS/cgroup memory, số goroutine, connection hiện
+hoạt, `NRestarts` của systemd và việc report traffic/user về panel. RAM có thể tăng
+theo tải đang hoạt động nhưng không được tiếp tục giữ đỉnh cũ sau churn/reload.
 
 ## Rollback
 

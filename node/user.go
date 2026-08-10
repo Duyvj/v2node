@@ -32,29 +32,32 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		}
 	}
 
-	if onlineDevice, err := c.limiter.GetOnlineDevice(); err != nil {
+	// The tracker has hard per-user/node bounds, so retaining it while a traffic
+	// POST fails is safe and preserves upstream's eventual online-IP reporting.
+	// A successful traffic phase atomically rotates the map below.
+	onlineDevice, onlineErr := c.limiter.GetOnlineDevice()
+	if onlineErr != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
-			"err": err,
+			"err": onlineErr,
 		}).Info("Get online device failed")
 	} else if len(*onlineDevice) > 0 {
-		var result []panel.OnlineUser
-		var nocountUID = make(map[int]struct{})
+		nocountUID := make(map[int]struct{})
 		for _, traffic := range userTraffic {
 			total := traffic.Upload + traffic.Download
 			if total < int64(devicemin*1000) {
 				nocountUID[traffic.UID] = struct{}{}
 			}
 		}
-		for _, online := range *onlineDevice {
-			if _, ok := nocountUID[online.UID]; !ok {
-				result = append(result, online)
-			}
-		}
 		data := make(map[int][]string)
-		for _, onlineuser := range result {
+		reported := 0
+		for _, onlineuser := range *onlineDevice {
+			if _, skip := nocountUID[onlineuser.UID]; skip {
+				continue
+			}
 			// json structure: { UID1:["ip1","ip2"],UID2:["ip3","ip4"] }
 			data[onlineuser.UID] = append(data[onlineuser.UID], onlineuser.IP)
+			reported++
 		}
 		if len(data) != 0 {
 			err := c.apiClient.ReportNodeOnlineUsers(ctx, &data)
@@ -68,7 +71,7 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				}
 			}
 		}
-		log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), len(result))
+		log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), reported)
 	}
 
 	return nil

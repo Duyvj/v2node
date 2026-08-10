@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
@@ -56,6 +57,8 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	defer v.access.Unlock()
 	v.Server = getCore(v.Config, infos)
 	if err := v.Server.Start(); err != nil {
+		_ = v.Server.Close()
+		v.Server = nil
 		return err
 	}
 	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
@@ -67,15 +70,21 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 func (v *V2Core) Close() error {
 	v.access.Lock()
 	defer v.access.Unlock()
+	if v.Server == nil {
+		return nil
+	}
+	var closeErr error
+	if v.dispatcher != nil {
+		closeErr = errors.Join(closeErr, v.dispatcher.Close())
+	}
+	closeErr = errors.Join(closeErr, v.Server.Close())
 	v.Config = nil
 	v.ihm = nil
 	v.ohm = nil
 	v.dispatcher = nil
-	err := v.Server.Close()
-	if err != nil {
-		return err
-	}
-	return nil
+	v.Server = nil
+	v.users = nil
+	return closeErr
 }
 
 func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
@@ -93,21 +102,8 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 	// Inbound config
 	var inBoundConfig []*core.InboundHandlerConfig
 
-	// Policy config. The upstream default is 128 KiB per connection; the
-	// personal build uses a configurable 64 KiB default for small VPSes.
-	bufferSizeKB := c.Runtime.BufferSizeKB
-	if bufferSizeKB <= 0 {
-		bufferSizeKB = 64
-	}
-	levelPolicyConfig := &coreConf.Policy{
-		StatsUserUplink:   false,
-		StatsUserDownlink: false,
-		Handshake:         proto.Uint32(4),
-		ConnectionIdle:    proto.Uint32(120),
-		UplinkOnly:        proto.Uint32(2),
-		DownlinkOnly:      proto.Uint32(4),
-		BufferSize:        proto.Int32(int32(bufferSizeKB)),
-	}
+	// Policy config
+	levelPolicyConfig := buildLevelPolicy(c.Runtime)
 	corePolicyConfig := &coreConf.PolicyConfig{}
 	corePolicyConfig.Levels = map[uint32]*coreConf.Policy{0: levelPolicyConfig}
 	policyConfig, _ := corePolicyConfig.Build()
@@ -132,4 +128,17 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 	}
 	log.Info("Xray Core Version: ", core.Version())
 	return server
+}
+
+func buildLevelPolicy(runtimeConfig conf.RuntimeConfig) *coreConf.Policy {
+	runtimeConfig.Normalize()
+	return &coreConf.Policy{
+		StatsUserUplink:   false,
+		StatsUserDownlink: false,
+		Handshake:         proto.Uint32(4),
+		ConnectionIdle:    proto.Uint32(120),
+		UplinkOnly:        proto.Uint32(2),
+		DownlinkOnly:      proto.Uint32(4),
+		BufferSize:        proto.Int32(int32(runtimeConfig.BufferSizeKB)),
+	}
 }

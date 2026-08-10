@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "product": "v2node-personal",
-  "version": "v0.4.4-personal.1",
+  "version": "v0.4.4-ram1",
   "source_repo": "https://github.com/wyx2685/v2node",
   "source_tag": "v0.4.4",
   "source_commit": "2daa9dd4a114aa39294350475defa2b748d595ed",
@@ -10,7 +10,13 @@
   "build": {
     "cgo_enabled": false,
     "flags": "-trimpath -buildvcs=false -s -w -buildid=",
-    "tests": "go mod verify; go test ./...; go vet ./..."
+    "tests": "v2node: go mod verify, go test ./..., go vet ./...; patched Xray packages: go mod verify, go test, go vet"
+  },
+  "xray": {
+    "source": "wyx2685/xray-core",
+    "commit": "b17a88f9b46d",
+    "local_path": "third_party/xray-core",
+    "patch_scope": "RAM bounds, concurrency and shutdown/deadline lifecycle"
   },
   "geodata": [
     {
@@ -25,18 +31,18 @@
     }
   ],
   "source_bundle": {
-    "name": "v2node-personal-v0.4.4-p1-source.zip"
+    "name": "v2node-personal-v0.4.4-ram1-source.zip"
   },
   "artifacts": [
     {
-      "name": "v2node-personal-v0.4.4-p1-linux-64.zip",
-      "size": 31682951,
-      "sha256": "ec72782211e683c1804bb4f56f1cb4240a4e29236491b9c722beb9276299dd2f"
+      "name": "v2node-personal-v0.4.4-ram1-linux-64.zip",
+      "size": 31723849,
+      "sha256": "d293861fad08df0ab4666075c0d79edc4ef7d6473d73cd5ea8b9f0faba674df2"
     },
     {
-      "name": "v2node-personal-v0.4.4-p1-linux-arm64-v8a.zip",
-      "size": 29308992,
-      "sha256": "76d373985fe8695d2612b1de2878d510396b46960ebbf313d4f1eda28f76d490"
+      "name": "v2node-personal-v0.4.4-ram1-linux-arm64-v8a.zip",
+      "size": 29352295,
+      "sha256": "1d9c9288d1c84206d9540ea9b7071b4b321b31a0745edb3218669fd762966b5c"
     }
   ]
 }

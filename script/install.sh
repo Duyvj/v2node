@@ -7,7 +7,10 @@ IFS=$'\n\t'
 umask 077
 
 readonly PRODUCT="v2node-personal"
-readonly DEFAULT_VERSION="v0.4.4-personal.1"
+readonly DEFAULT_VERSION="v0.4.4-ram1"
+readonly RELEASE_REPOSITORY="https://github.com/Duyvj/v2node"
+readonly DEFAULT_SHA256_64="d293861fad08df0ab4666075c0d79edc4ef7d6473d73cd5ea8b9f0faba674df2"
+readonly DEFAULT_SHA256_ARM64="1d9c9288d1c84206d9540ea9b7071b4b321b31a0745edb3218669fd762966b5c"
 readonly INSTALL_ROOT="/usr/local/v2node"
 readonly RELEASES_DIR="${INSTALL_ROOT}/releases"
 readonly CURRENT_LINK="${INSTALL_ROOT}/current"
@@ -51,25 +54,28 @@ die()  { printf '[%s] ERROR: %s\n' "$PRODUCT" "$*" >&2; exit 1; }
 usage() {
   cat <<'EOF'
 Usage:
+  install.sh [options]
   install.sh --package FILE --sha256 HASH [options]
   install.sh --package-url HTTPS_URL --sha256 HASH [options]
   install.sh --rollback
 
 Required for a new install:
-  --package FILE             Local package, or --package-url HTTPS_URL
-  --sha256 HASH              Exact SHA-256 of that package
   --config-file FILE         Root-only JSON config (recommended), or:
   --api-host URL --node-id ID --api-key-file FILE
 
 Options:
-  --version VERSION          Release label (default: v0.4.4-personal.1)
+  --package FILE             Custom local package (requires --sha256)
+  --package-url HTTPS_URL    Custom HTTPS package (requires --sha256)
+  --sha256 HASH              Exact SHA-256 for a custom package
+  --version VERSION          Release label (default: v0.4.4-ram1)
   --keep-releases N          Retain N staged releases (default: 3)
   --api-key-stdin            Read the API key without putting it in argv
   --no-resource-profile      Do not create swap/sysctl/service guardrails
   --no-swap                  Skip emergency swap creation
   -h, --help                 Show this help
 
-The installer never downloads the floating upstream 'latest' release.
+Without package arguments, the installer uses the architecture-specific asset
+and SHA-256 pinned to v0.4.4-ram1. It never resolves a floating 'latest' release.
 EOF
 }
 
@@ -105,6 +111,23 @@ arch_asset() {
     aarch64|arm64) printf 'arm64-v8a\n' ;;
     *) die "unsupported architecture: $(uname -m)" ;;
   esac
+}
+
+select_default_package() {
+  local asset="$1"
+  if [[ -n "$PACKAGE_PATH" || -n "$PACKAGE_URL" ]]; then
+    return
+  fi
+  [[ "$VERSION" == "$DEFAULT_VERSION" ]] || die 'a custom --version requires --package or --package-url'
+  PACKAGE_URL="${RELEASE_REPOSITORY}/releases/download/${DEFAULT_VERSION}/v2node-personal-${DEFAULT_VERSION}-linux-${asset}.zip"
+  if [[ -z "$PACKAGE_SHA256" ]]; then
+    case "$asset" in
+      64) PACKAGE_SHA256="$DEFAULT_SHA256_64" ;;
+      arm64-v8a) PACKAGE_SHA256="$DEFAULT_SHA256_ARM64" ;;
+      *) die "unsupported release asset: $asset" ;;
+    esac
+  fi
+  log "using pinned ${DEFAULT_VERSION} package"
 }
 
 effective_memory_mib() {
@@ -197,7 +220,7 @@ generate_config() {
   chmod 0600 "$key_file"
   if command -v jq >/dev/null 2>&1; then
     jq -n --arg host "$API_HOST" --argjson id "$NODE_ID" --rawfile key "$key_file" \
-      '{Log:{Level:"warning",Output:"",Access:"none"},Runtime:{MinPollIntervalSeconds:30,MaxPollIntervalSeconds:3600,BufferSizeKB:64},Nodes:[{ApiHost:$host,NodeID:$id,ApiKey:$key,Timeout:15}]}' \
+      '{Log:{Level:"warning",Output:"",Access:"none"},Runtime:{MinPollIntervalSeconds:30,MaxPollIntervalSeconds:3600,BufferSizeKB:64,MaxTrackedIPsPerUser:256,MaxTrackedIPsPerNode:32768,MaxPanelResponseBytes:16777216,MaxUsers:100000},Nodes:[{ApiHost:$host,NodeID:$id,ApiKey:$key,Timeout:15}]}' \
       > "$TMP_DIR/config.json"
   elif command -v python3 >/dev/null 2>&1; then
     API_HOST="$API_HOST" NODE_ID="$NODE_ID" API_KEY_FILE="$key_file" python3 - <<'PY' > "$TMP_DIR/config.json"
@@ -206,7 +229,7 @@ with open(os.environ["API_KEY_FILE"], "r", encoding="utf-8") as handle:
     api_key = handle.read()
 print(json.dumps({
     "Log": {"Level": "warning", "Output": "", "Access": "none"},
-    "Runtime": {"MinPollIntervalSeconds": 30, "MaxPollIntervalSeconds": 3600, "BufferSizeKB": 64},
+    "Runtime": {"MinPollIntervalSeconds": 30, "MaxPollIntervalSeconds": 3600, "BufferSizeKB": 64, "MaxTrackedIPsPerUser": 256, "MaxTrackedIPsPerNode": 32768, "MaxPanelResponseBytes": 16777216, "MaxUsers": 100000},
     "Nodes": [{"ApiHost": os.environ["API_HOST"], "NodeID": int(os.environ["NODE_ID"]), "ApiKey": api_key, "Timeout": 15}],
 }, separators=(",", ":")))
 PY
@@ -668,6 +691,7 @@ install_release() {
   [[ -d /run/systemd/system ]] || die 'systemd is required'
   asset="$(arch_asset)"
   log "target asset: linux-${asset}"
+  select_default_package "$asset"
   safe_config_source
   resource_profile
   download_and_verify

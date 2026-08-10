@@ -3,8 +3,14 @@
 - Repository: https://github.com/wyx2685/v2node
 - Tag: `v0.4.4`
 - Commit: `2daa9dd4a114aa39294350475defa2b748d595ed`
-- Requested upstream installer: https://raw.githubusercontent.com/wyx2685/v2node/master/script/install.sh
+- Original installer: https://raw.githubusercontent.com/wyx2685/v2node/master/script/install.sh
+- Xray replacement pinned by upstream: `wyx2685/xray-core`
+  commit `b17a88f9b46d`
 
-The personal fork does not execute the upstream floating installer. Its source patch is kept in `source/`, and `deploy/install.sh` consumes only an explicit package plus SHA-256.
+The application source was reset to the exact upstream tag before applying the
+RAM-only patch set. The exact pinned Xray source is included in
+`third_party/xray-core`; its local delta is restricted to bounded live state,
+concurrency correctness and shutdown/deadline lifecycle.
 
-Geo assets are frozen in this bundle and recorded by exact size/SHA-256 in `manifest.json`; builds do not download a floating geodata branch.
+Geo assets remain frozen and are recorded by exact size/SHA-256 in
+`release/manifest.json`.

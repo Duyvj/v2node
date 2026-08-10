@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 
 	"github.com/vmihailenco/msgpack/v5"
+	"github.com/vmihailenco/msgpack/v5/msgpcode"
 )
 
 type OnlineUser struct {
@@ -48,48 +50,172 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 		return nil, fmt.Errorf("received nil response or raw response")
 	}
 	defer r.RawResponse.Body.Close()
-
-	if r.StatusCode() == 304 {
+	status := r.StatusCode()
+	if status == 304 {
 		return nil, nil
 	}
-	userlist := &UserListBody{}
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("user list request failed with HTTP status %d", status)
+	}
+	if r.RawResponse.ContentLength > int64(c.maxResponseBytes) {
+		return nil, fmt.Errorf("user list response is too large: %d bytes", r.RawResponse.ContentLength)
+	}
+	limitedBody := &io.LimitedReader{R: r.RawResponse.Body, N: int64(c.maxResponseBytes) + 1}
+
+	var users []UserInfo
 	if strings.Contains(r.Header().Get("Content-Type"), "application/x-msgpack") {
-		decoder := msgpack.NewDecoder(r.RawResponse.Body)
-		if err := decoder.Decode(userlist); err != nil {
-			return nil, fmt.Errorf("decode user list error: %w", err)
-		}
-	} else {
-		dec := jsontext.NewDecoder(r.RawResponse.Body)
-		for {
-			tok, err := dec.ReadToken()
-			if err != nil {
-				return nil, fmt.Errorf("decode user list error: %w", err)
-			}
-			if tok.Kind() == '"' && tok.String() == "users" {
-				break
-			}
-		}
-		tok, err := dec.ReadToken()
+		decoder := msgpack.NewDecoder(limitedBody)
+		users, err = decodeMsgpackUsers(decoder, c.maxUsers)
 		if err != nil {
 			return nil, fmt.Errorf("decode user list error: %w", err)
 		}
-		if tok.Kind() != '[' {
-			return nil, fmt.Errorf(`decode user list error: expected "users" array`)
-		}
-		for dec.PeekKind() != ']' {
-			val, err := dec.ReadValue()
-			if err != nil {
-				return nil, fmt.Errorf("decode user list error: read user object: %w", err)
-			}
-			var u UserInfo
-			if err := json.Unmarshal(val, &u); err != nil {
-				return nil, fmt.Errorf("decode user list error: unmarshal user error: %w", err)
-			}
-			userlist.Users = append(userlist.Users, u)
+	} else {
+		dec := jsontext.NewDecoder(limitedBody)
+		users, err = decodeJSONUsers(dec, c.maxUsers)
+		if err != nil {
+			return nil, fmt.Errorf("decode user list error: %w", err)
 		}
 	}
+	if limitedBody.N <= 0 {
+		return nil, fmt.Errorf("user list response exceeds limit of %d bytes", c.maxResponseBytes)
+	}
 	c.userEtag = r.Header().Get("ETag")
-	return userlist.Users, nil
+	return users, nil
+}
+
+func decodeJSONUsers(decoder *jsontext.Decoder, maxUsers int) ([]UserInfo, error) {
+	tok, err := decoder.ReadToken()
+	if err != nil {
+		return nil, err
+	}
+	if tok.Kind() != '{' {
+		return nil, errors.New("expected top-level object")
+	}
+
+	users := make([]UserInfo, 0)
+	foundUsers := false
+	for decoder.PeekKind() != '}' {
+		key, err := decoder.ReadToken()
+		if err != nil {
+			return nil, err
+		}
+		if key.Kind() != '"' {
+			return nil, errors.New("expected top-level object field name")
+		}
+		if key.String() != "users" {
+			if err := decoder.SkipValue(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if foundUsers {
+			return nil, errors.New(`duplicate top-level "users" field`)
+		}
+		foundUsers = true
+
+		tok, err := decoder.ReadToken()
+		if err != nil {
+			return nil, err
+		}
+		if tok.Kind() != '[' {
+			return nil, errors.New(`expected top-level "users" array`)
+		}
+		for decoder.PeekKind() != ']' {
+			if len(users) >= maxUsers {
+				return nil, fmt.Errorf("user list exceeds limit of %d users", maxUsers)
+			}
+			value, err := decoder.ReadValue()
+			if err != nil {
+				return nil, fmt.Errorf("read user object: %w", err)
+			}
+			var user UserInfo
+			if err := json.Unmarshal(value, &user); err != nil {
+				return nil, fmt.Errorf("unmarshal user: %w", err)
+			}
+			users = append(users, user)
+		}
+		if _, err := decoder.ReadToken(); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := decoder.ReadToken(); err != nil {
+		return nil, err
+	}
+	if !foundUsers {
+		return nil, errors.New(`missing top-level "users" field`)
+	}
+	if _, err := decoder.ReadToken(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("unexpected trailing JSON value")
+		}
+		return nil, err
+	}
+	return users, nil
+}
+
+func decodeMsgpackUsers(decoder *msgpack.Decoder, maxUsers int) ([]UserInfo, error) {
+	code, err := decoder.PeekCode()
+	if err != nil {
+		return nil, err
+	}
+	if !msgpcode.IsFixedMap(code) && code != msgpcode.Map16 && code != msgpcode.Map32 {
+		return nil, errors.New("expected top-level map")
+	}
+	fields, err := decoder.DecodeMapLen()
+	if err != nil {
+		return nil, err
+	}
+	if fields < 0 {
+		return nil, errors.New("expected top-level map")
+	}
+
+	users := make([]UserInfo, 0)
+	foundUsers := false
+	for i := 0; i < fields; i++ {
+		key, err := decoder.DecodeString()
+		if err != nil {
+			return nil, err
+		}
+		if key != "users" {
+			if err := decoder.Skip(); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if foundUsers {
+			return nil, errors.New(`duplicate top-level "users" field`)
+		}
+		foundUsers = true
+
+		count, err := decoder.DecodeArrayLen()
+		if err != nil {
+			return nil, err
+		}
+		if count < 0 {
+			return nil, errors.New(`expected top-level "users" array`)
+		}
+		if count > maxUsers {
+			return nil, fmt.Errorf("user list exceeds limit of %d users", maxUsers)
+		}
+		users = make([]UserInfo, 0, count)
+		for j := 0; j < count; j++ {
+			var user UserInfo
+			if err := decoder.Decode(&user); err != nil {
+				return nil, err
+			}
+			users = append(users, user)
+		}
+	}
+	if !foundUsers {
+		return nil, errors.New(`missing top-level "users" field`)
+	}
+	if _, err := decoder.PeekCode(); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("unexpected trailing MessagePack value")
+	}
+	return users, nil
 }
 
 // GetUserAlive will fetch the alive_ip count for users

@@ -198,10 +198,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 		}
 	}
 
-	// set interval
+	// Clamp panel values so malformed intervals cannot create a busy loop and
+	// very long intervals cannot retain online-IP snapshots indefinitely.
 	if cm.BaseConfig != nil {
-		node.PushInterval = c.minPollInterval
-		node.PullInterval = c.minPollInterval
 		node.PushInterval = clampInterval(intervalToTime(cm.BaseConfig.PushInterval), c.minPollInterval, c.maxPollInterval)
 		node.PullInterval = clampInterval(intervalToTime(cm.BaseConfig.PullInterval), c.minPollInterval, c.maxPollInterval)
 	} else {
