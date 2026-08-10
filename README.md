@@ -23,10 +23,10 @@ Ví dụ cho VPS `amd64/x86_64`:
 ```bash
 curl --fail --location --proto '=https' --proto-redir '=https' \
   -o /root/v2node-install.sh \
-  https://raw.githubusercontent.com/Duyyvj/v2node/v0.4.4-p1/deploy/install.sh
+  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-p1/deploy/install.sh
 chmod 700 /root/v2node-install.sh
 sudo /root/v2node-install.sh \
-  --package-url https://github.com/Duyyvj/v2node/releases/download/v0.4.4-p1/v2node-personal-v0.4.4-p1-linux-64.zip \
+  --package-url https://github.com/Duyvj/v2node/releases/download/v0.4.4-p1/v2node-personal-v0.4.4-p1-linux-64.zip \
   --sha256 ec72782211e683c1804bb4f56f1cb4240a4e29236491b9c722beb9276299dd2f \
   --config-file /root/v2node-config.json
 ```
