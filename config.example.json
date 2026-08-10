@@ -1,0 +1,20 @@
+{
+  "Log": {
+    "Level": "warning",
+    "Output": "",
+    "Access": "none"
+  },
+  "Runtime": {
+    "MinPollIntervalSeconds": 30,
+    "MaxPollIntervalSeconds": 3600,
+    "BufferSizeKB": 64
+  },
+  "Nodes": [
+    {
+      "ApiHost": "https://panel.example/",
+      "NodeID": 1,
+      "ApiKey": "REPLACE_ME",
+      "Timeout": 15
+    }
+  ]
+}

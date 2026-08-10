@@ -1,0 +1,30 @@
+# Build outputs
+/artifacts/
+/dist/
+/v2node
+*.test
+*.out
+
+# Local configuration and secrets
+/config.json
+/.env
+*.key
+*.pem
+
+# IDE and operating-system files
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+
+# Legacy upstream scratch files
+/example/
+/output/
+/new.sh
+/quick_update.sh
+/api/chooseparser.go.bak
