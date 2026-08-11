@@ -2,26 +2,49 @@
 
 ## Quy trình khuyến nghị
 
-1. Cài bản gốc `wyx2685/v2node` và xác nhận `v2node status` hoạt động.
-2. Áp RAM-fix trên một máy canary cho mỗi kiến trúc CPU.
-3. Kiểm tra `v2node status`, `v2node version` và journal.
-4. Rollout một batch nhỏ, theo dõi RAM, restart count và report traffic.
+1. Cài trực tiếp nhánh standalone trên một máy canary cho mỗi kiến trúc CPU.
+2. Nhập config panel hoặc truyền đủ `--api-host`, `--node-id` và `--api-key`.
+3. Kiểm tra `v2node status`, `v2node version`, journal và report traffic.
+4. Rollout một batch nhỏ; theo dõi RAM, restart count và băng thông thực tế.
 5. Chỉ triển khai toàn fleet khi batch nhỏ ổn định.
 
-Luôn pin tag, URL và SHA-256 cho overlay. Không dùng release `latest`. Installer
-`v0.4.4-ram5` đã pin sẵn asset + hash theo kiến trúc nên cùng một lệnh có thể dùng
-cho cả fleet `amd64` và `arm64`.
+Không cần cài `wyx2685/v2node` trước. Installer tự tạo binary, geodata, config,
+menu `v2node`, service và profile RAM ram5.
 
-## Lệnh cài pin theo tag
+## Lệnh cài standalone
 
 ```bash
-wget -O /root/v2node-install.sh \
-  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram5/script/install.sh
-chmod 700 /root/v2node-install.sh
-sudo /root/v2node-install.sh
+(
+  set -e
+  installer="$(mktemp /tmp/v2node-install.XXXXXX)"
+  trap 'rm -f -- "$installer"' EXIT
+  curl -fL https://raw.githubusercontent.com/Duyvj/v2node/upgraded-v0.4.4/script/install.sh \
+    -o "$installer"
+  chmod 700 "$installer"
+  sudo "$installer"
+)
 ```
 
-Overlay từ chối chạy nếu VPS chưa có đầy đủ binary, config, menu và service của bản gốc.
+Triển khai không tương tác:
+
+```bash
+(
+  set -e
+  installer="$(mktemp /tmp/v2node-install.XXXXXX)"
+  trap 'rm -f -- "$installer"' EXIT
+  curl -fL https://raw.githubusercontent.com/Duyvj/v2node/upgraded-v0.4.4/script/install.sh \
+    -o "$installer"
+  chmod 700 "$installer"
+  sudo "$installer" \
+    --api-host https://panel.example/ \
+    --node-id 1 \
+    --api-key 'YOUR_API_KEY'
+)
+```
+
+Khi tạo bản triển khai cố định cho production, nên pin URL về đúng commit hoặc tag
+standalone đã kiểm tra. Binary bên trong vẫn luôn được lấy từ release bất biến
+`v0.4.4-ram5` và xác minh bằng SHA-256; installer không dùng release `latest`.
 
 ## Hash release v0.4.4-ram5
 
@@ -34,11 +57,12 @@ Trong canary, theo dõi ít nhất RSS/cgroup memory, số goroutine, connection
 hoạt, `NRestarts` của systemd và việc report traffic/user về panel. RAM có thể tăng
 theo tải đang hoạt động nhưng không được tiếp tục giữ đỉnh cũ sau churn/reload.
 
-## Rollback
+## Nâng cấp và khôi phục lỗi
 
-```bash
-sudo /usr/local/lib/v2node-ramfix/install.sh --rollback
-v2node status
-```
+Chạy lại cùng installer để nâng cấp; `/etc/v2node/config.json` hiện có được giữ
+nguyên. Tất cả asset được tải và kiểm tra trước khi service dừng. Nếu việc thay file,
+áp profile hoặc health check thất bại, installer tự khôi phục file và trạng thái
+active/enabled có trước lần chạy đó.
 
-Installer cũng tự rollback khi package, ELF, service start hoặc health gate không đạt yêu cầu.
+Luôn giữ máy canary và bản commit/tag đã chạy ổn định để có thể quay lại phiên bản
+đã biết tốt trước khi rollout tiếp.

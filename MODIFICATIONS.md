@@ -85,19 +85,22 @@ và `MemoryHigh` chừa `max(128 MiB, 5%)`; trên VPS nhỏ các khoảng này l
 khi nhiều người dùng đồng thời, trong khi trần cứng vẫn khiến systemd restart riêng
 service thay vì để v2node làm cạn RAM/swap của cả VPS.
 
-## Cài đè và rollback
+## Cài standalone và rollback trong transaction
 
-- Installer yêu cầu layout bản gốc, dừng `v2node.service` và chờ inactive trước khi
-  thay duy nhất `/usr/local/v2node/v2node` bằng phép đổi tên nguyên tử.
-- File config, menu `/usr/bin/v2node`, geodata và fragment service chính được snapshot
-  hash + metadata rồi xác nhận không đổi sau health check. Overlay không ghi các file
-  này, không tạo `current/releases`, không tạo swap và không sửa sysctl.
-- Drop-in `90-v2node-ramfix.conf` chỉ bổ sung `GOMEMLIMIT`, `MemoryHigh`, `MemoryMax`
-  và `MemorySwapMax`; mọi lệnh và chính sách quản lý service gốc vẫn giữ nguyên.
-- Backup format 3 có SHA-256 coverage đầy đủ cho binary/drop-in/installer và mọi bản
-  ghi invariant. Backup tự xác minh trước khi dừng service, rollback guard được kích
-  hoạt trước live mutation, và restore kiểm tra lại checksum trước khi dùng.
-- Lệnh quản lý vẫn là `v2node` nguyên bản; không cài thêm controller/CLI hay menu thay thế.
+- Installer chạy được trên VPS trắng hoặc cài đè bản gốc; không gọi installer
+  upstream và không xóa trước `/usr/local/v2node`.
+- Binary ram5, geodata, config template và menu được tải qua HTTPS, giới hạn kích
+  thước và xác minh SHA-256 trước khi service dừng. ZIP còn được kiểm tra whitelist,
+  expanded size, symlink/hardlink, `VERSION` và kiến trúc ELF.
+- `/etc/v2node/config.json` hiện có được snapshot rồi giữ nguyên nội dung. File mới
+  có mode `0600`; menu và binary được thay bằng rename trên cùng filesystem.
+- Main service giữ layout upstream. RAM policy nằm trong drop-in
+  `90-v2node-ramfix.conf`; OpenRC dùng `GOMEMLIMIT` và báo rõ rằng không có cgroup
+  controls tương đương systemd.
+- Nếu thay file, áp service/profile hoặc health check thất bại, trap khôi phục các
+  file cùng trạng thái active/enabled có trước lần chạy.
+- Lệnh quản lý vẫn là `v2node`; `install`, `update` và `update_shell` được pin về
+  nhánh standalone để không quay lại binary upstream chưa sửa.
 
 ## Kiểm thử bắt buộc
 

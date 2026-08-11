@@ -1,8 +1,88 @@
-# v2node v0.4.4-ram5 — RAM fix overlay
+# v2node v0.4.4-ram5 — bản standalone ổn định RAM
 
-Bản mod RAM-only từ [wyx2685/v2node](https://github.com/wyx2685/v2node)
-`v0.4.4`, dành cho nhiều VPS nhỏ và máy chạy lâu ngày. Protocol, routing,
-sniffing, panel API, quản lý user và report traffic giữ nguyên baseline upstream.
+Đây là nhánh đầy đủ của [wyx2685/v2node](https://github.com/wyx2685/v2node)
+`v0.4.4` đã tích hợp sẵn các bản sửa RAM. Có thể cài trực tiếp lên VPS trắng,
+không cần cài v2node gốc trước và vẫn quản lý bằng đúng lệnh `v2node`.
+
+Protocol, routing, sniffing, panel API, quản lý user và report traffic giữ nguyên
+baseline upstream. Nhánh này chỉ thay các điểm gây giữ RAM lâu dài, bổ sung giới
+hạn an toàn và làm lại quy trình cài/cập nhật.
+
+## Cài trực tiếp trên VPS trắng
+
+Đăng nhập bằng `root` rồi chạy một lệnh:
+
+```bash
+(
+  set -e
+  installer="$(mktemp /tmp/v2node-install.XXXXXX)"
+  trap 'rm -f -- "$installer"' EXIT
+  curl -fL https://raw.githubusercontent.com/Duyvj/v2node/upgraded-v0.4.4/script/install.sh \
+    -o "$installer"
+  chmod 700 "$installer"
+  bash "$installer"
+)
+```
+
+Installer sẽ hỏi thông tin panel nếu terminal đang ở chế độ tương tác. Có thể cài
+không cần hỏi bằng cách truyền đủ ba tham số:
+
+```bash
+(
+  set -e
+  installer="$(mktemp /tmp/v2node-install.XXXXXX)"
+  trap 'rm -f -- "$installer"' EXIT
+  curl -fL https://raw.githubusercontent.com/Duyvj/v2node/upgraded-v0.4.4/script/install.sh \
+    -o "$installer"
+  chmod 700 "$installer"
+  bash "$installer" \
+    --api-host https://panel.example/ \
+    --node-id 1 \
+    --api-key 'YOUR_API_KEY'
+)
+```
+
+Nếu không nhập thông tin panel, toàn bộ chương trình vẫn được cài nhưng service
+được để dừng và chưa bật khởi động cùng hệ thống, tránh vòng lặp lỗi với config mẫu.
+Sau đó chạy:
+
+```bash
+v2node generate
+```
+
+Các lệnh quản lý vẫn giống bản gốc:
+
+```bash
+v2node
+v2node status
+v2node log
+v2node restart
+v2node version
+v2node update
+```
+
+## Cài đè hoặc nâng cấp
+
+Có thể chạy lại đúng installer trên máy đã có v2node gốc, ram3, ram4 hoặc ram5.
+File `/etc/v2node/config.json` hiện có được giữ nguyên nội dung. Installer tải và
+xác minh toàn bộ binary, geodata, config template và menu trước khi dừng service;
+nếu thay file hoặc health check thất bại, trạng thái trước đó được khôi phục trong
+cùng lần chạy.
+
+Menu `v2node install`, `v2node update` và `v2node update_shell` đều được khóa về
+nhánh `upgraded-v0.4.4` này, nên không vô tình cài lại binary upstream chưa sửa.
+
+Installer chỉ chấp nhận Linux `amd64/x86_64` hoặc `arm64/aarch64` và pin đúng
+binary của release `v0.4.4-ram5`:
+
+| Kiến trúc | SHA-256 archive |
+|---|---|
+| amd64 | `db1d0e83fbfff5b7b243fa0e9f469230964b083cf3339a68d6a48ec58f93e038` |
+| arm64 | `ad88e6d888318e4875a1e28b37fa360ba5605ef7cc4f44ba866e1b4c8f54c2fd` |
+
+Geodata và config template cũng được tải từ tag bất biến và kiểm tra SHA-256.
+Không truy vấn `latest`, không đoán amd64 khi gặp CPU lạ và không tải installer
+upstream trong nền.
 
 ## Vì sao bản gốc có thể tăng RAM theo thời gian
 
@@ -22,86 +102,36 @@ Bản này xử lý ở nguồn:
 - giảm buffer mặc định từ 128 KiB xuống 64 KiB và bỏ Xray user-stat trùng lặp;
 - parser panel có giới hạn byte/user và không coi response lỗi là danh sách rỗng;
 - sửa race khi thêm/xóa user, traffic counter và link manager;
-- lỗi startup/reload trả exit code khác 0 để systemd tự khởi động lại.
+- lỗi startup/reload trả exit code khác 0 để service manager tự khởi động lại.
 
-Chi tiết kỹ thuật: [MODIFICATIONS.md](MODIFICATIONS.md) và
+Chi tiết kỹ thuật nằm trong [MODIFICATIONS.md](MODIFICATIONS.md) và
 [Xray RAM patch](third_party/xray-core/V2NODE_RAM_PATCH.md). Baseline chính xác
 được ghi tại [release/UPSTREAM.md](release/UPSTREAM.md).
 
-## Cài đè an toàn lên bản gốc
+## Profile RAM ram5
 
-Nếu VPS đã cài bản gốc bằng `wyx2685/v2node` và có
-`/etc/v2node/config.json` hợp lệ, chỉ cần chạy:
+Trên systemd, installer tạo drop-in
+`/etc/systemd/system/v2node.service.d/90-v2node-ramfix.conf`. Profile ưu tiên tải
+đồng thời cao: chừa cho hệ điều hành `max(384 MiB, 15% RAM)` nhưng không quá 25%
+RAM trên VPS nhỏ; `MemoryMax` dùng phần còn lại. `GOMEMLIMIT` chừa
+`max(256 MiB, 10% trần service)` và `MemoryHigh` chỉ là ngưỡng áp lực gần trần
+cứng. `MemorySwapMax` là 10% RAM, clamp 128–512 MiB.
 
-```bash
-wget -O /root/v2node-ramfix.sh \
-  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram5/script/install.sh
-chmod 700 /root/v2node-ramfix.sh
-sudo /root/v2node-ramfix.sh
-```
-
-Đây chỉ là overlay, không phải bộ cài v2node mới. Installer yêu cầu bản gốc đã có
-binary, config, menu và `v2node.service`; nó chỉ thay nguyên tử
-`/usr/local/v2node/v2node` bằng binary RAM fix và thêm drop-in
-`/etc/systemd/system/v2node.service.d/90-v2node-ramfix.conf`.
-
-`/etc/v2node/config.json`, `/usr/bin/v2node`, file `v2node.service` chính và toàn bộ
-geodata được giữ nguyên từng byte lẫn metadata. Trước khi thay binary, installer lưu
-binary/drop-in cũ tại `/var/backups/v2node-ramfix`, ghi checksum của mọi file phải giữ
-nguyên, tự kiểm tra backup rồi mới dừng service. Nếu health check không đạt, binary
-gốc được khôi phục tự động.
-
-Nếu máy từng cài `ram1/ram2` và binary đang là symlink, installer dừng trước mọi
-thay đổi. Hãy cài lại upstream `v0.4.4` rồi mới chạy overlay này; ram5 không tự
-rollback layout cũ để tránh ghi đè config đã được chỉnh sau đó. Máy đang chạy
-`ram3/ram4` có thể cài đè trực tiếp lên `ram5`.
-
-Installer tự nhận `amd64/x86_64` hoặc `arm64/aarch64`, dùng đúng asset của tag
-`v0.4.4-ram5` và SHA-256 được nhúng sẵn; không truy vấn release `latest`.
-
-Checksum chính thức nằm trong `release/SHA256SUMS` và asset `SHA256SUMS` của
-GitHub Release. Installer đã pin cùng các giá trị đó theo từng kiến trúc.
-
-## Quản lý và rollback
-
-```bash
-v2node
-v2node status
-v2node log
-v2node restart
-v2node version
-```
-
-Đây chính là menu/lệnh của bản gốc; overlay không cài thêm CLI nào. Rollback kỹ thuật
-của overlay dùng installer đã xác minh:
-
-```bash
-sudo /usr/local/lib/v2node-ramfix/install.sh --rollback
-```
-
-Installer kiểm tra SHA-256, cấu trúc ZIP, kiến trúc ELF và health gate. Profile
-`ram5` ưu tiên tải đồng thời cao: chừa cho hệ điều hành `max(384 MiB, 15% RAM)`
-nhưng không quá 25% RAM trên VPS nhỏ; `MemoryMax` dùng phần còn lại. `GOMEMLIMIT`
-chừa `max(256 MiB, 10% trần service)`, được cap ở một phần ba trần trên máy nhỏ.
-`MemoryHigh` chừa `max(128 MiB, 5%)`, được cap ở một phần tư trần trên máy nhỏ.
-`MemorySwapMax` vẫn là 10% RAM, clamp 128–512 MiB.
-
-Giá trị danh nghĩa theo RAM/cgroup hiệu dụng:
-
-| RAM | Chừa cho host | GOMEMLIMIT | MemoryHigh | MemoryMax |
+| RAM/cgroup hiệu dụng | Chừa cho host | GOMEMLIMIT | MemoryHigh | MemoryMax |
 |---:|---:|---:|---:|---:|
 | 2 GiB | 384 MiB | 1408 MiB | 1536 MiB | 1664 MiB |
 | 4 GiB | 614 MiB | 3134 MiB | 3308 MiB | 3482 MiB |
 
-Vì `GOMEMLIMIT` và `MemoryHigh` cao hơn ram3, GC/reclaim không can thiệp sớm khi
-nhiều người dùng đồng thời. Trần cứng vẫn là lớp bảo vệ cuối để riêng service được
-restart thay vì làm cả VPS cạn RAM. Overlay không tạo swap hoặc sửa sysctl.
-Nếu config đã đặt `Runtime.MemoryLimit`, giá trị đó sẽ chủ động thay `GOMEMLIMIT`
-của drop-in. Sau khi nâng/hạ RAM VPS, hãy chạy lại installer để tính lại profile.
+Đây không phải một giới hạn RAM thấp cố định. VPS lớn tự có thêm headroom cho nhiều
+người dùng; trần cứng chỉ là lớp bảo vệ cuối để riêng service được restart thay vì
+làm cả VPS cạn RAM. Nếu config có `Runtime.MemoryLimit` không rỗng, giá trị đó sẽ
+chủ động thay `GOMEMLIMIT` tự động.
 
-`ram5` được pin đúng baseline upstream `v0.4.4` và sẽ từ chối ghi đè một upstream
-mới hơn. Nếu dùng `v2node update` lên phiên bản khác, chỉ áp lại overlay khi đã có
-RAM-fix được build và kiểm thử cho đúng baseline đó.
+Alpine/OpenRC vẫn dùng đúng binary và `GOMEMLIMIT` ram5, nhưng OpenRC không cung
+cấp `MemoryHigh`/`MemoryMax`/`MemorySwapMax` như systemd. Với systemd cũ, installer
+dùng `MemoryLimit` tương thích và báo rõ directive nào không được hệ thống hỗ trợ.
+
+Sau khi tăng hoặc giảm RAM VPS, chạy lại installer để tính lại profile.
 
 ## Runtime guardrails
 
@@ -130,8 +160,8 @@ bash build/build.sh
 cat artifacts/SHA256SUMS
 ```
 
-Build script chạy verify/test/vet cho v2node và toàn bộ package Xray đã vá, sau
-đó cross-build Linux `amd64`/`arm64` với `CGO_ENABLED=0`, `-trimpath`, `-s -w`.
+Build script chạy verify/test/vet cho v2node và các package Xray đã vá, sau đó
+cross-build Linux amd64/arm64 với `CGO_ENABLED=0`, `-trimpath` và `-s -w`.
 
-Triển khai fleet theo thứ tự canary → batch nhỏ → toàn bộ. Xem
+Triển khai nhiều VPS theo thứ tự canary → batch nhỏ → toàn bộ. Xem
 [docs/FLEET_DEPLOYMENT.md](docs/FLEET_DEPLOYMENT.md).

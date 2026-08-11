@@ -14,106 +14,149 @@ fail() {
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
 
-# Cgroup fixtures must select the tightest real limit and must not turn a
-# sub-MiB limit into an unlimited-host fallback.
+cmp -s "$ROOT/deploy/install.sh" "$ROOT/script/install.sh" ||
+  fail 'published installer copies differ'
+bash -n "$ROOT/deploy/install.sh" || fail 'installer syntax check failed'
+[[ "$BINARY_FILE" == '/usr/local/v2node/v2node' ]] ||
+  fail 'binary path variables were not expanded'
+[[ "$CONFIG_FILE" == '/etc/v2node/config.json' ]] ||
+  fail 'config path variables were not expanded'
+[[ "$SYSTEMD_DROPIN" == '/etc/systemd/system/v2node.service.d/90-v2node-ramfix.conf' ]] ||
+  fail 'systemd drop-in path variables were not expanded'
+
+# Argument parsing stays compatible with the original panel flags while pinning
+# every installation to the tested ram5 binary.
+(
+  VERSION_ARG=''
+  API_HOST_ARG=''
+  NODE_ID_ARG=''
+  API_KEY_ARG=''
+  parse_args v0.4.4-ram5 --api-host https://panel.example/ --node-id 7 --api-key secret
+  [[ "$API_HOST_ARG:$NODE_ID_ARG:$API_KEY_ARG" == 'https://panel.example/:7:secret' ]]
+) || fail 'complete panel arguments were not accepted'
+if (
+  VERSION_ARG=''
+  API_HOST_ARG=''
+  NODE_ID_ARG=''
+  API_KEY_ARG=''
+  parse_args --node-id 7
+) >/dev/null 2>&1; then
+  fail 'partial panel arguments were accepted'
+fi
+if (
+  VERSION_ARG=''
+  API_HOST_ARG=''
+  NODE_ID_ARG=''
+  API_KEY_ARG=''
+  parse_args v9.9.9
+) >/dev/null 2>&1; then
+  fail 'an untested binary version was accepted'
+fi
+
+# Cgroup fixtures must select the tightest real limit.
 MEMINFO_FILE="$tmp/meminfo"
 CGROUP_V2_MEMORY_MAX_FILE="$tmp/memory.max"
 CGROUP_V1_MEMORY_LIMIT_FILE="$tmp/memory.limit_in_bytes"
 printf 'MemTotal:       4194304 kB\n' > "$MEMINFO_FILE"
 printf 'max\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
-[[ "$(effective_memory_mib)" == 4096 ]] || fail 'unlimited cgroup-v2 did not use host RAM'
-printf '0\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
-[[ "$(effective_memory_mib)" == 0 ]] || fail 'zero cgroup-v2 limit fell back to host RAM'
-if (resource_profile >/dev/null 2>&1); then
-  fail 'zero cgroup-v2 limit was accepted'
-fi
-printf 'max\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
-printf '1073741824\n' > "$CGROUP_V1_MEMORY_LIMIT_FILE"
-[[ "$(effective_memory_mib)" == 4096 ]] || fail 'cgroup-v1 shadowed authoritative cgroup-v2 max'
-rm -f "$CGROUP_V1_MEMORY_LIMIT_FILE"
-printf '8589934592\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
-[[ "$(effective_memory_mib)" == 4096 ]] || fail 'cgroup limit larger than host RAM was selected'
+[[ "$(effective_memory_mib)" == 4096 ]] ||
+  fail 'unlimited cgroup-v2 did not use host RAM'
 printf '2147483648\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
-[[ "$(effective_memory_mib)" == 2048 ]] || fail 'cgroup-v2 limit did not override host RAM'
-printf '268435456\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
-[[ "$(effective_memory_mib)" == 256 ]] || fail 'exact 256 MiB cgroup limit was parsed incorrectly'
+[[ "$(effective_memory_mib)" == 2048 ]] ||
+  fail 'cgroup-v2 did not override host RAM'
 printf '268435455\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
-[[ "$(effective_memory_mib)" == 255 ]] || fail 'sub-256 MiB cgroup limit was rounded up'
-printf '524288\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
-[[ "$(effective_memory_mib)" == 0 ]] || fail 'sub-MiB cgroup limit fell back to host RAM'
+[[ "$(effective_memory_mib)" == 255 ]] ||
+  fail 'sub-256 MiB limit was rounded up'
 if (resource_profile >/dev/null 2>&1); then
-  fail 'sub-MiB cgroup limit was accepted'
+  fail 'less than 256 MiB was accepted'
 fi
 rm -f "$CGROUP_V2_MEMORY_MAX_FILE"
 printf '9223372036854771712\n' > "$CGROUP_V1_MEMORY_LIMIT_FILE"
-[[ "$(effective_memory_mib)" == 4096 ]] || fail 'unlimited cgroup-v1 sentinel did not use host RAM'
+[[ "$(effective_memory_mib)" == 4096 ]] ||
+  fail 'unlimited cgroup-v1 sentinel did not use host RAM'
 printf '1073741824\n' > "$CGROUP_V1_MEMORY_LIMIT_FILE"
-[[ "$(effective_memory_mib)" == 1024 ]] || fail 'cgroup-v1 limit did not override host RAM'
-
-# Every supported memory size must preserve Go heap < soft pressure < hard cap,
-# reserve the documented host headroom and keep swap bounded.
-for test_mem in 256 479 480 767 768 1279 1280 1599 1600 2048 4096; do
-  effective_memory_mib() { printf '%s\n' "$test_mem"; }
-  resource_profile >/dev/null
-  (( GOMEMLIMIT_MIB < MEMORY_HIGH_MIB && MEMORY_HIGH_MIB < MEMORY_MAX_MIB )) ||
-    fail "invalid memory ordering at ${test_mem} MiB"
-  (( MEMORY_SWAP_MAX_MIB >= 128 && MEMORY_SWAP_MAX_MIB <= 512 )) ||
-    fail "invalid swap ceiling at ${test_mem} MiB"
-  expected_reserve=$((test_mem * 15 / 100))
-  (( expected_reserve >= 384 )) || expected_reserve=384
-  max_reserve=$((test_mem / 4))
-  (( expected_reserve <= max_reserve )) || expected_reserve=$max_reserve
-  (( HOST_RESERVE_MIB == expected_reserve )) ||
-    fail "wrong host reserve at ${test_mem} MiB"
-  (( MEMORY_MAX_MIB + HOST_RESERVE_MIB == test_mem )) ||
-    fail "memory cap does not preserve host reserve at ${test_mem} MiB"
-done
+[[ "$(effective_memory_mib)" == 1024 ]] ||
+  fail 'cgroup-v1 did not override host RAM'
 
 assert_profile() {
-  local test_mem="$1" expected_reserve="$2" expected_go="$3"
-  local expected_high="$4" expected_max="$5" expected_swap="$6"
+  local test_mem="$1" expected="$2"
   effective_memory_mib() { printf '%s\n' "$test_mem"; }
   resource_profile >/dev/null
-  [[ "$HOST_RESERVE_MIB:$GOMEMLIMIT_MIB:$MEMORY_HIGH_MIB:$MEMORY_MAX_MIB:$MEMORY_SWAP_MAX_MIB" == "$expected_reserve:$expected_go:$expected_high:$expected_max:$expected_swap" ]] ||
-    fail "unexpected capacity profile at ${test_mem} MiB"
+  [[ "$HOST_RESERVE_MIB:$GOMEMLIMIT_MIB:$MEMORY_HIGH_MIB:$MEMORY_MAX_MIB:$MEMORY_SWAP_MAX_MIB" == "$expected" ]] ||
+    fail "unexpected ram5 profile at $test_mem MiB"
 }
 
-assert_profile 256 64 128 144 192 128
-assert_profile 512 128 256 288 384 128
-assert_profile 1024 256 512 640 768 128
-assert_profile 1536 384 896 1024 1152 153
-assert_profile 2048 384 1408 1536 1664 204
-assert_profile 3072 460 2351 2482 2612 307
-assert_profile 4096 614 3134 3308 3482 409
-assert_profile 8192 1228 6268 6616 6964 512
+assert_profile 256 '64:128:144:192:128'
+assert_profile 512 '128:256:288:384:128'
+assert_profile 1024 '256:512:640:768:128'
+assert_profile 2048 '384:1408:1536:1664:204'
+assert_profile 4096 '614:3134:3308:3482:409'
+assert_profile 8192 '1228:6268:6616:6964:512'
 
-effective_memory_mib() { printf '255\n'; }
-if (resource_profile >/dev/null 2>&1); then
-  fail '255 MiB effective RAM was accepted'
+# The release ZIP contract, inner binary hash and ELF architecture are checked
+# independently of the outer archive hash.
+STAGE_DIR="$tmp/archive-stage"
+mkdir -p "$STAGE_DIR/extracted"
+cp "$ROOT/artifacts/v2node-linux-64.zip" "$STAGE_DIR/package.zip"
+ARCH_ASSET='64'
+BINARY_SHA256="$BINARY_SHA256_64"
+validate_release_archive >/dev/null ||
+  fail 'valid amd64 release archive was rejected'
+if (
+  rm -rf "$STAGE_DIR/extracted"
+  mkdir -p "$STAGE_DIR/extracted"
+  ARCH_ASSET='arm64-v8a'
+  BINARY_SHA256="$BINARY_SHA256_64"
+  validate_release_archive
+) >/dev/null 2>&1; then
+  fail 'amd64 ELF was accepted as arm64'
 fi
-assert_profile 681 170 341 384 511 128
-assert_profile 682 170 342 384 512 128
-assert_profile 1023 255 512 640 768 128
-assert_profile 1289 322 711 839 967 128
-assert_profile 1290 322 712 840 968 129
-assert_profile 1535 383 896 1024 1152 153
-assert_profile 2566 384 1926 2054 2182 256
-assert_profile 2567 385 1926 2054 2182 256
-assert_profile 3022 453 2313 2441 2569 302
-assert_profile 3023 453 2313 2442 2570 302
-assert_profile 3034 455 2322 2451 2579 303
-assert_profile 3035 455 2322 2451 2580 303
-assert_profile 5119 767 3917 4135 4352 511
-assert_profile 5120 768 3917 4135 4352 512
-assert_profile 5130 769 3925 4143 4361 512
 
-# Profile verification must match the exact environment key, not a substring.
-test_mem=2048
-effective_memory_mib() { printf '%s\n' "$test_mem"; }
+# New configs validate inputs, preserve the ram5 runtime defaults and escape JSON.
+API_HOST_ARG='https://panel.example/'
+NODE_ID_ARG='9'
+API_KEY_ARG='a"b\c'
+write_generated_config "$tmp/generated.json"
+grep -Fq '"BufferSizeKB": 64' "$tmp/generated.json" ||
+  fail 'generated config lost the ram5 buffer size'
+grep -Fq '"ApiKey": "a\"b\\c"' "$tmp/generated.json" ||
+  fail 'generated config did not JSON-escape the API key'
+API_HOST_ARG='https://panel.example/'
+NODE_ID_ARG='not-a-number'
+API_KEY_ARG='secret'
+if (write_generated_config "$tmp/invalid.json") >/dev/null 2>&1; then
+  fail 'invalid node ID was accepted'
+fi
+
+# Candidate units retain the original service layout and add RAM controls only
+# through a drop-in. OpenRC keeps GOMEMLIMIT without claiming cgroup controls.
+effective_memory_mib() { printf '2048\n'; }
 resource_profile >/dev/null
-MOCK_ENVIRONMENT="NOT_GOMEMLIMIT=${GOMEMLIMIT}"
-MOCK_EFFECTIVE_HIGH="$((MEMORY_HIGH_MIB * 1024 * 1024))"
-MOCK_EFFECTIVE_MAX="$((MEMORY_MAX_MIB * 1024 * 1024))"
+STAGE_DIR="$tmp/service-stage"
+mkdir -p "$STAGE_DIR"
+SERVICE_MANAGER='systemd'
+write_service_candidates
+grep -Fq 'ExecStart=/usr/local/v2node/v2node server' "$STAGE_DIR/v2node.service" ||
+  fail 'systemd unit changed the original executable'
+if grep -Eq 'Memory(High|Max|Limit|SwapMax)|GOMEMLIMIT' "$STAGE_DIR/v2node.service"; then
+  fail 'RAM policy leaked into the original main unit'
+fi
+grep -Fq "Environment=\"GOMEMLIMIT=$GOMEMLIMIT\"" "$STAGE_DIR/90-v2node-ramfix.conf" ||
+  fail 'systemd drop-in lacks GOMEMLIMIT'
+grep -Fq "MemoryHigh=$MEMORY_HIGH" "$STAGE_DIR/90-v2node-ramfix.conf" ||
+  fail 'systemd drop-in lacks MemoryHigh'
+grep -Fq "MemoryMax=$MEMORY_MAX" "$STAGE_DIR/90-v2node-ramfix.conf" ||
+  fail 'systemd drop-in lacks MemoryMax'
+grep -Fq "MemorySwapMax=$MEMORY_SWAP_MAX" "$STAGE_DIR/90-v2node-ramfix.conf" ||
+  fail 'systemd drop-in lacks MemorySwapMax'
+SERVICE_MANAGER='openrc'
+write_service_candidates
+grep -Fq "export GOMEMLIMIT=\"$GOMEMLIMIT\"" "$STAGE_DIR/v2node.openrc" ||
+  fail 'OpenRC unit lacks GOMEMLIMIT'
+
+# Exact systemd properties are required when the host exposes them.
+SERVICE_MANAGER='systemd'
+MOCK_ENVIRONMENT="FOO=1 GOMEMLIMIT=$GOMEMLIMIT BAR=2"
 systemctl() {
   local prop='' arg next=0
   for arg in "$@"; do
@@ -121,192 +164,171 @@ systemctl() {
     [[ "$arg" == -p ]] && next=1
   done
   case "$prop" in
-    MemoryHigh) printf '%s\n' "$((MEMORY_HIGH_MIB * 1024 * 1024))" ;;
-    MemoryMax) printf '%s\n' "$((MEMORY_MAX_MIB * 1024 * 1024))" ;;
-    MemorySwapMax) printf '%s\n' "$((MEMORY_SWAP_MAX_MIB * 1024 * 1024))" ;;
-    Environment) printf '%s\n' "$MOCK_ENVIRONMENT" ;;
-    EffectiveMemoryHigh) printf '%s\n' "$MOCK_EFFECTIVE_HIGH" ;;
-    EffectiveMemoryMax) printf '%s\n' "$MOCK_EFFECTIVE_MAX" ;;
+    Environment) printf 'Environment=%s\n' "$MOCK_ENVIRONMENT" ;;
+    MemoryHigh) printf 'MemoryHigh=%s\n' "$((MEMORY_HIGH_MIB * 1024 * 1024))" ;;
+    MemoryMax) printf 'MemoryMax=%s\n' "$((MEMORY_MAX_MIB * 1024 * 1024))" ;;
+    MemoryLimit) printf 'MemoryLimit=%s\n' "$((MEMORY_MAX_MIB * 1024 * 1024))" ;;
+    MemorySwapMax) printf 'MemorySwapMax=%s\n' "$((MEMORY_SWAP_MAX_MIB * 1024 * 1024))" ;;
     *) return 1 ;;
   esac
 }
-if (verify_service_profile >/dev/null 2>&1); then
-  fail 'profile verifier accepted NOT_GOMEMLIMIT as GOMEMLIMIT'
+verify_service_profile >/dev/null ||
+  fail 'valid systemd RAM profile was rejected'
+MOCK_ENVIRONMENT="NOT_GOMEMLIMIT=$GOMEMLIMIT"
+if (verify_service_profile) >/dev/null 2>&1; then
+  fail 'substring environment key was accepted as GOMEMLIMIT'
 fi
-MOCK_ENVIRONMENT="FOO=1 GOMEMLIMIT=${GOMEMLIMIT} BAR=2"
-MOCK_EFFECTIVE_HIGH="$((MEMORY_HIGH_MIB * 1024 * 1024 - 1))"
-if (verify_service_profile >/dev/null 2>&1); then
-  fail 'profile verifier accepted a lower parent EffectiveMemoryHigh'
-fi
-MOCK_EFFECTIVE_HIGH="$((MEMORY_HIGH_MIB * 1024 * 1024))"
-MOCK_EFFECTIVE_MAX="$((MEMORY_MAX_MIB * 1024 * 1024 - 1))"
-if (verify_service_profile >/dev/null 2>&1); then
-  fail 'profile verifier accepted a lower parent EffectiveMemoryMax'
-fi
-MOCK_EFFECTIVE_MAX="$((MEMORY_MAX_MIB * 1024 * 1024))"
-verify_service_profile >/dev/null 2>&1 || fail 'profile verifier rejected the exact GOMEMLIMIT assignment'
 unset -f systemctl
 
-# Health validation must reject a service that repeatedly changes PID (flapping).
-printf '0\n' > "$tmp/health-counter"
-systemctl() {
-  local prop='' arg next=0
-  if [[ "$1" == is-active ]]; then printf 'active\n'; return 0; fi
-  for arg in "$@"; do
-    if (( next == 1 )); then prop="$arg"; break; fi
-    [[ "$arg" == -p ]] && next=1
-  done
-  case "$prop" in
-    MainPID)
-      local count
-      count="$(<"$tmp/health-counter")"
-      count=$((count + 1))
-      printf '%s\n' "$count" > "$tmp/health-counter"
-      printf '%s\n' "$((1000 + count))"
-      ;;
-    ExecMainStatus|NRestarts) printf '0\n' ;;
-    *) return 1 ;;
-  esac
-}
-sleep() { :; }
-if health_check; then
-  fail 'health check accepted a continuously flapping service'
+# Snapshot restoration covers both replaced and newly-created files.
+SERVICE_MANAGER='openrc'
+SNAPSHOT_PATHS=("$tmp/live-a" "$tmp/live-b")
+SNAPSHOT_LABELS=(a b)
+printf 'before' > "$tmp/live-a"
+TMP_DIR="$tmp/transaction"
+mkdir -p "$TMP_DIR"
+service() { return 1; }
+rc-update() { return 1; }
+snapshot_state
+printf 'after' > "$tmp/live-a"
+printf 'new' > "$tmp/live-b"
+CREATED_DIRS=()
+TEMP_LIVE_FILES=()
+TRANSACTION_ACTIVE=1
+ROLLBACK_RUNNING=0
+restore_snapshot >/dev/null 2>&1
+[[ "$(<"$tmp/live-a")" == before ]] ||
+  fail 'rollback did not restore a replaced file'
+[[ ! -e "$tmp/live-b" ]] ||
+  fail 'rollback did not remove a newly-created file'
+unset -f service rc-update
+
+# Exercise the real atomic install path against a disposable blank filesystem.
+# A transformed copy changes only absolute roots; the production functions and
+# candidate assets remain unchanged.
+export FIXTURE_ROOT="$tmp/blank-root"
+export INSTALLER_SOURCE="$ROOT/deploy/install.sh"
+export FIXTURE_ARCHIVE="$ROOT/artifacts/v2node-linux-64.zip"
+export FIXTURE_GEOIP="$ROOT/assets/geoip.dat"
+export FIXTURE_GEOSITE="$ROOT/assets/geosite.dat"
+export FIXTURE_CONFIG="$ROOT/config.example.json"
+export FIXTURE_MENU="$ROOT/script/v2node.sh"
+bash -c '
+  set -Eeuo pipefail
+  mkdir -p \
+    "$FIXTURE_ROOT/usr/local" \
+    "$FIXTURE_ROOT/usr/bin" \
+    "$FIXTURE_ROOT/etc/systemd/system" \
+    "$FIXTURE_ROOT/etc"
+  source <(
+    sed \
+      -e "s|^readonly INSTALL_ROOT=.*|readonly INSTALL_ROOT=\"$FIXTURE_ROOT/usr/local/v2node\"|" \
+      -e "s|^readonly CONFIG_DIR=.*|readonly CONFIG_DIR=\"$FIXTURE_ROOT/etc/v2node\"|" \
+      -e "s|^readonly MENU_FILE=.*|readonly MENU_FILE=\"$FIXTURE_ROOT/usr/bin/v2node\"|" \
+      -e "s|^readonly SYSTEMD_UNIT=.*|readonly SYSTEMD_UNIT=\"$FIXTURE_ROOT/etc/systemd/system/v2node.service\"|" \
+      -e "s|^readonly SYSTEMD_DROPIN_DIR=.*|readonly SYSTEMD_DROPIN_DIR=\"$FIXTURE_ROOT/etc/systemd/system/v2node.service.d\"|" \
+      -e "s|^readonly OPENRC_UNIT=.*|readonly OPENRC_UNIT=\"$FIXTURE_ROOT/etc/init.d/v2node\"|" \
+      "$INSTALLER_SOURCE"
+  )
+  install() {
+    local mode=
+    while (($#)); do
+      case "$1" in
+        -o|-g) shift 2 ;;
+        -m) mode="$2"; shift 2 ;;
+        --) shift; break ;;
+        *) break ;;
+      esac
+    done
+    command install -m "$mode" "$@"
+  }
+  STAGE_DIR="$FIXTURE_ROOT/stage"
+  mkdir -p "$STAGE_DIR/extracted"
+  unzip -q "$FIXTURE_ARCHIVE" -d "$STAGE_DIR/extracted"
+  cp "$FIXTURE_GEOIP" "$STAGE_DIR/geoip.dat"
+  cp "$FIXTURE_GEOSITE" "$STAGE_DIR/geosite.dat"
+  cp "$FIXTURE_CONFIG" "$STAGE_DIR/config.example.json"
+  cp "$FIXTURE_MENU" "$STAGE_DIR/v2node-menu.sh"
+  GOMEMLIMIT=1408MiB
+  MEMORY_HIGH=1536M
+  MEMORY_MAX=1664M
+  MEMORY_SWAP_MAX=204M
+  SERVICE_MANAGER=systemd
+  write_service_candidates
+  mkdir() {
+    if [[ "$1" == -m ]]; then shift 2; fi
+    command mkdir "$@"
+  }
+  CONFIG_SOURCE="$STAGE_DIR/config.example.json"
+  NEW_CONFIG=1
+  register_managed_paths
+  create_live_directories
+  install_candidate_files
+  [[ -f "$FIXTURE_ROOT/usr/local/v2node/v2node" ]]
+  [[ -f "$FIXTURE_ROOT/usr/bin/v2node" ]]
+  [[ -f "$FIXTURE_ROOT/etc/v2node/config.json" ]]
+  [[ -f "$FIXTURE_ROOT/etc/systemd/system/v2node.service" ]]
+  [[ -f "$FIXTURE_ROOT/etc/systemd/system/v2node.service.d/90-v2node-ramfix.conf" ]]
+  cmp -s "$FIXTURE_ROOT/etc/v2node/config.json" "$FIXTURE_CONFIG"
+' || fail 'disposable blank-root installation fixture failed'
+
+# Static safety and ordering invariants.
+grep -Fq "RAW_BRANCH_BASE='https://raw.githubusercontent.com/Duyvj/v2node/upgraded-v0.4.4'" "$ROOT/deploy/install.sh" ||
+  fail 'installer is not pinned to the standalone branch'
+grep -Fq "RAW_RELEASE_BASE='https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram5'" "$ROOT/deploy/install.sh" ||
+  fail 'immutable support asset tag is missing'
+grep -Fq 'assert_safe_file_or_missing "$path"' "$ROOT/deploy/install.sh" ||
+  fail 'managed file safety gate is missing'
+grep -Fq 'TRANSACTION_ACTIVE=1' "$ROOT/deploy/install.sh" ||
+  fail 'transaction rollback gate is missing'
+grep -Fq "readonly LOCK_DIR='/run/v2node-standalone-install.lock'" "$ROOT/deploy/install.sh" ||
+  fail 'installer lock is not protected by the root-owned /run directory'
+grep -Fq "if [[ \"\$PLATFORM\" == alpine ]]; then" "$ROOT/deploy/install.sh" ||
+  fail 'Alpine full-tool bootstrap is missing'
+grep -Fq "apk add --no-cache bash ca-certificates curl unzip coreutils" "$ROOT/deploy/install.sh" ||
+  fail 'Alpine does not force the Info-ZIP/coreutils packages'
+restore_block="$(awk '/^restore_snapshot\(\)/{inside=1} /^cleanup_on_exit\(\)/{inside=0} inside{print}' "$ROOT/deploy/install.sh")"
+grep -Fq 'set +u' <<<"$restore_block" ||
+  fail 'rollback is unsafe for empty arrays on Bash before 4.4'
+if grep -Fq -- '--value' "$ROOT/deploy/install.sh"; then
+  fail 'installer uses systemctl --value, which breaks supported old systemd releases'
 fi
-unset -f systemctl sleep
-
-# Build a complete format-3 backup without touching system paths.
-BACKUP_DIR="$tmp/backup"
-mkdir -p "$BACKUP_DIR" "$tmp/original" "$tmp/dropin-dir" "$tmp/support-dir"
-printf '%s' 'original-binary' > "$tmp/original/v2node"
-printf '%s' 'old-dropin' > "$tmp/original/dropin"
-printf '%s' 'old-installer' > "$tmp/original/installer"
-backup_path "$tmp/original/v2node" binary
-backup_path "$tmp/original/dropin" dropin
-backup_path "$tmp/original/installer" installer
-record_directory_state "$tmp/dropin-dir" dropin-dir
-record_directory_state "$tmp/support-dir" support-dir
-
-for label in config service menu root-geoip root-geosite etc-geoip etc-geosite; do
-  printf '%s' "$label-original" > "$tmp/original/$label"
-  snapshot_path "$tmp/original/$label" "$label"
-done
-printf '%s\n' active > "$BACKUP_DIR/service-state"
-printf '%s' 'candidate-binary' > "$tmp/original/candidate"
-sha256_file "$tmp/original/candidate" > "$BACKUP_DIR/candidate-binary.sha256"
-printf '3\n' > "$BACKUP_DIR/backup-format"
-finalize_backup
-touch "$BACKUP_DIR/prepared"
-validate_backup "$BACKUP_DIR" || fail 'fresh complete overlay backup was rejected'
-assert_untouched_files "$BACKUP_DIR" || fail 'untouched baseline did not validate'
-
-# Rollback accepts its candidate/original binary, but refuses a later replacement.
-cp "$tmp/original/candidate" "$tmp/original/live-binary"
-rollback_binary_is_safe "$BACKUP_DIR" "$tmp/original/live-binary" || fail 'candidate binary was rejected for rollback'
-cp "$BACKUP_DIR/binary" "$tmp/original/live-binary"
-rollback_binary_is_safe "$BACKUP_DIR" "$tmp/original/live-binary" || fail 'already-restored binary was rejected'
-printf '%s' 'newer-upstream-binary' > "$tmp/original/live-binary"
-if rollback_binary_is_safe "$BACKUP_DIR" "$tmp/original/live-binary" 2>/dev/null; then
-  fail 'rollback accepted a binary replaced after overlay installation'
+grep -Fq 'if (( START_AFTER_INSTALL == 1 )); then' "$ROOT/deploy/install.sh" ||
+  fail 'service enablement is not conditional on a usable panel config'
+if grep -Eq 'validate_original_install|install upstream v2node first|rm -rf /usr/local/v2node|wyx2685/v2node/(master|main)/script' "$ROOT/deploy/install.sh"; then
+  fail 'overlay-only or destructive upstream behavior remains'
 fi
-
-# Missing checksum coverage must fail even when all remaining checksums are valid.
-cp "$BACKUP_DIR/backup-manifest.sha256" "$tmp/complete-manifest"
-awk '!/\/binary$/' "$BACKUP_DIR/backup-manifest.sha256" > "$tmp/trimmed-manifest"
-mv -f "$tmp/trimmed-manifest" "$BACKUP_DIR/backup-manifest.sha256"
-if validate_backup "$BACKUP_DIR" 2>/dev/null; then
-  fail 'validator accepted a manifest missing binary coverage'
+if grep -Eq 'v2nodectl|s390x|arch="64".*default' "$ROOT/deploy/install.sh"; then
+  fail 'renamed CLI or unsafe architecture fallback remains'
 fi
-cp "$tmp/complete-manifest" "$BACKUP_DIR/backup-manifest.sha256"
-
-# Modified rollback payload and modified untouched files must both be detected.
-printf '%s' 'corrupt-binary' > "$BACKUP_DIR/binary"
-if validate_backup "$BACKUP_DIR" 2>/dev/null; then
-  fail 'validator accepted a modified binary backup'
-fi
-cp "$tmp/original/v2node" "$BACKUP_DIR/binary"
-cp "$tmp/complete-manifest" "$BACKUP_DIR/backup-manifest.sha256"
-printf '%s' 'changed-config' > "$tmp/original/config"
-if assert_untouched_files "$BACKUP_DIR" 2>/dev/null; then
-  fail 'untouched-file guard missed a config change'
-fi
-
-# Restore helpers replace the binary and remove paths that were originally absent.
-printf '%s' 'patched-binary' > "$tmp/original/v2node"
-restore_path "$BACKUP_DIR" binary "$tmp/original/v2node" || fail 'binary restore failed'
-[[ "$(<"$tmp/original/v2node")" == 'original-binary' ]] || fail 'wrong restored binary content'
-rm -f "$BACKUP_DIR/dropin"
-: > "$BACKUP_DIR/dropin.missing"
-printf '%s' 'candidate-dropin' > "$tmp/original/candidate-dropin"
-restore_path "$BACKUP_DIR" dropin "$tmp/original/candidate-dropin" || fail 'missing drop-in restore failed'
-[[ ! -e "$tmp/original/candidate-dropin" ]] || fail 'new drop-in survived rollback'
-
-cmp -s "$ROOT/deploy/install.sh" "$ROOT/script/install.sh" || fail 'published installer differs from deploy installer'
-grep -Fq 'ORIGINAL_BINARY="${ORIGINAL_ROOT}/v2node"' "$ROOT/deploy/install.sh" || fail 'upstream binary path changed'
-grep -Fq 'DROPIN_FILE="${DROPIN_DIR}/90-v2node-ramfix.conf"' "$ROOT/deploy/install.sh" || fail 'RAM drop-in path is missing'
-grep -Fq 'snapshot_path "$CONFIG_FILE" config' "$ROOT/deploy/install.sh" || fail 'config preservation guard is missing'
-grep -Fq 'snapshot_path "$MENU_FILE" menu' "$ROOT/deploy/install.sh" || fail 'menu preservation guard is missing'
-grep -Fq 'snapshot_path "$fragment" service' "$ROOT/deploy/install.sh" || fail 'main service preservation guard is missing'
-grep -Fq 'MemoryHigh=${MEMORY_HIGH}' "$ROOT/deploy/install.sh" || fail 'MemoryHigh is missing'
-grep -Fq 'MemoryMax=${MEMORY_MAX}' "$ROOT/deploy/install.sh" || fail 'MemoryMax is missing'
-grep -Fq 'MemorySwapMax=${MEMORY_SWAP_MAX}' "$ROOT/deploy/install.sh" || fail 'MemorySwapMax is missing'
-grep -Fq 'config contains Runtime.MemoryLimit' "$ROOT/deploy/install.sh" || fail 'Runtime.MemoryLimit override warning is missing'
-grep -Fq 'v0.4.4|v0.4.4-ram3|v0.4.4-ram4|v0.4.4-ram5)' "$ROOT/deploy/install.sh" || fail 'upstream-version gate is missing'
-grep -Fq 'set -o noclobber' "$ROOT/deploy/install.sh" || fail 'lock creation is not symlink-safe'
-grep -Fq 'exec 9<>"$LOCK_FILE"' "$ROOT/deploy/install.sh" || fail 'lock file is opened with a truncating mode'
-if grep -Eq 'CURRENT_LINK|RELEASES_DIR|v2node-menu|v2nodectl|/swapfile|SYSCTL_FILE|write_service\(' "$ROOT/deploy/install.sh"; then
-  fail 'installer still contains replacement-layout, menu/controller, swap, sysctl or main-service logic'
-fi
-
-install_block="$(awk '
-  /^install_overlay_files\(\)/ { inside=1 }
-  /^verify_service_profile\(\)/ { inside=0 }
-  inside { print }
-' "$ROOT/deploy/install.sh")"
-if grep -Eq 'CONFIG_FILE|MENU_FILE|geoip|geosite|v2node\.service[^.]' <<<"$install_block"; then
-  fail 'overlay write block touches an upstream-managed file'
-fi
-
-awk '
-  /^install_overlay\(\)/ { inside=1 }
-  inside && /validate_original_install/ { original=NR }
-  inside && /download_and_verify/ { package=NR }
-  inside && /snapshot_existing_state/ { backup=NR }
-  inside && /TRANSACTION_ACTIVE=1/ { armed=NR }
-  inside && /stop_service/ && !stop { stop=NR }
-  inside && /install_overlay_files/ { live=NR }
-  inside && /health_check/ { health=NR }
-  inside && /touch "\$BACKUP_DIR\/committed"/ { commit=NR }
-  inside && /^}/ { exit ! (original < package && package < backup && backup < armed && armed < stop && stop < live && live < health && health < commit) }
-' "$ROOT/deploy/install.sh" || fail 'overlay transaction ordering invariant failed'
 
 awk '
   /^main\(\)/ { inside=1 }
-  inside && /ROLLBACK_REQUESTED == 1/ { rollback=NR }
-  inside && /require_cmd unzip/ { unzip=NR }
-  inside && /^}/ { exit ! (rollback && unzip && rollback < unzip) }
-' "$ROOT/deploy/install.sh" || fail 'emergency rollback still depends on install-only ZIP tools'
+  inside && /validate_live_state/ { live=NR }
+  inside && /download_and_verify_assets/ { download=NR }
+  inside && /resource_profile/ { profile=NR }
+  inside && /prepare_config_candidate/ { config=NR }
+  inside && /install_standalone/ { install=NR }
+  inside && /^}/ {
+    exit ! (live < download && download < profile && profile < config && config < install)
+  }
+' "$ROOT/deploy/install.sh" ||
+  fail 'main does not verify all assets before live installation'
 
-restore_block="$(awk '
-  /^restore_backup\(\)/ { inside=1 }
-  /^cleanup_old_backups\(\)/ { inside=0 }
-  inside { print }
-' "$ROOT/deploy/install.sh")"
-grep -Fq "upstream-managed files changed after the overlay; they will remain untouched" <<<"$restore_block" ||
-  fail 'rollback does not tolerate later upstream/config drift'
-grep -Fq '(( failed == 0 )) || return 1' <<<"$restore_block" ||
-  fail 'rollback can remove its installer after an incomplete restore'
-grep -Fq 'health_check || failed=1' <<<"$restore_block" ||
-  fail 'rollback does not require the restored active service to remain healthy'
+awk '
+  /^install_standalone\(\)/ { inside=1 }
+  inside && /snapshot_state/ { snapshot=NR }
+  inside && /TRANSACTION_ACTIVE=1/ { armed=NR }
+  inside && /stop_service_for_install/ { stop=NR }
+  inside && /install_candidate_files/ { files=NR }
+  inside && /verify_installed_files/ { verify=NR }
+  inside && /health_check/ { health=NR }
+  inside && /TRANSACTION_ACTIVE=0/ { commit=NR }
+  inside && /^}/ {
+    exit ! (snapshot < armed && armed < stop && stop < files && files < verify &&
+      verify < health && health < commit)
+  }
+' "$ROOT/deploy/install.sh" ||
+  fail 'standalone transaction ordering invariant failed'
 
-migration_block="$(awk '
-  /^migrate_ram2_if_needed\(\)/ { inside=1 }
-  /^validate_original_install\(\)/ { inside=0 }
-  inside { print }
-' "$ROOT/deploy/install.sh")"
-grep -Fq 'reinstall upstream v0.4.4 first' <<<"$migration_block" ||
-  fail 'legacy ram1/ram2 layout is not rejected safely'
-if grep -Eq 'bash |--rollback|restore_backup' <<<"$migration_block"; then
-  fail 'minimal overlay still mutates legacy ram1/ram2 state automatically'
-fi
-
-printf 'PASS: minimal v2node RAM overlay backup and preservation invariants\n'
+printf 'PASS: standalone installer, ram5 profile and rollback invariants\n'

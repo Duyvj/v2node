@@ -1,5 +1,10 @@
 #!/bin/bash
 
+umask 077
+
+readonly V2NODE_FORK_INSTALL_URL="https://raw.githubusercontent.com/Duyvj/v2node/upgraded-v0.4.4/script/install.sh"
+readonly V2NODE_FORK_MENU_URL="https://raw.githubusercontent.com/Duyvj/v2node/upgraded-v0.4.4/script/v2node.sh"
+
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
@@ -106,32 +111,59 @@ before_show_menu() {
     show_menu
 }
 
-install() {
-    bash <(curl -Ls https://raw.githubusercontent.com/wyx2685/v2node/master/script/install.sh)
-    if [[ $? == 0 ]]; then
-        if [[ $# == 0 ]]; then
-            start
-        else
-            start 0
-        fi
+run_fork_installer() {
+    local installer status
+    installer=$(mktemp /tmp/v2node-install.XXXXXX) || return 1
+    if ! curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --retry 3 --connect-timeout 15 --max-time 600 \
+        --output "$installer" "$V2NODE_FORK_INSTALL_URL"; then
+        rm -f -- "$installer"
+        echo -e "${red}下载 v2node 安装脚本失败，请检查本机能否连接 GitHub${plain}"
+        return 1
     fi
+    chmod 700 "$installer"
+    if ! bash -n "$installer"; then
+        rm -f -- "$installer"
+        echo -e "${red}下载的安装脚本语法校验失败${plain}"
+        return 1
+    fi
+    bash "$installer" "$@"
+    status=$?
+    rm -f -- "$installer"
+    return "$status"
+}
+
+install() {
+    run_fork_installer
 }
 
 update() {
+    local version status
     if [[ $# == 0 ]]; then
-        echo && echo -n -e "输入指定版本(默认最新版): " && read version
+        echo && echo -n -e "输入版本(留空安装 v0.4.4-ram5，仅支持 ram5): " && read version
     else
         version=$2
     fi
-    bash <(curl -Ls https://raw.githubusercontent.com/wyx2685/v2node/master/script/install.sh) $version
-    if [[ $? == 0 ]]; then
-        echo -e "${green}更新完成，已自动重启 v2node，请使用 v2node log 查看运行日志${plain}"
-        exit
+    if [[ -n "$version" ]]; then
+        run_fork_installer "$version"
+    else
+        run_fork_installer
+    fi
+    status=$?
+    if [[ $status == 0 ]]; then
+        if check_status; then
+            echo -e "${green}更新完成，v2node 已重启，请使用 v2node log 查看运行日志${plain}"
+        else
+            echo -e "${green}更新完成；service 等待有效 panel config，请运行 v2node generate${plain}"
+        fi
+        return 0
     fi
 
+    echo -e "${red}v2node 更新失败，原安装已保留或回滚${plain}"
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
+    return "$status"
 }
 
 config() {
@@ -172,6 +204,8 @@ uninstall() {
     else
         systemctl stop v2node
         systemctl disable v2node
+        rm /etc/systemd/system/v2node.service.d/90-v2node-ramfix.conf -f
+        rmdir /etc/systemd/system/v2node.service.d 2>/dev/null || true
         rm /etc/systemd/system/v2node.service -f
         systemctl daemon-reload
         systemctl reset-failed
@@ -307,15 +341,46 @@ show_log() {
 }
 
 update_shell() {
-    wget -O /usr/bin/v2node -N --no-check-certificate https://raw.githubusercontent.com/wyx2685/v2node/master/script/v2node.sh
-    if [[ $? != 0 ]]; then
-        echo ""
-        echo -e "${red}下载脚本失败，请检查本机能否连接 Github${plain}"
-        before_show_menu
-    else
-        chmod +x /usr/bin/v2node
-        echo -e "${green}升级脚本成功，请重新运行脚本${plain}" && exit 0
+    local menu_tmp installer_tmp expected_sha actual_sha
+    menu_tmp=$(mktemp /usr/bin/.v2node-menu.XXXXXX) || return 1
+    installer_tmp=$(mktemp /tmp/v2node-installer-meta.XXXXXX) || {
+        rm -f -- "$menu_tmp"
+        return 1
+    }
+    if ! curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --retry 3 --connect-timeout 15 --max-time 120 \
+        --output "$menu_tmp" "$V2NODE_FORK_MENU_URL"; then
+        rm -f -- "$menu_tmp" "$installer_tmp"
+        echo -e "${red}下载管理脚本失败，请检查本机能否连接 Github${plain}"
+        return 1
     fi
+    if ! curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --retry 3 --connect-timeout 15 --max-time 120 \
+        --output "$installer_tmp" "$V2NODE_FORK_INSTALL_URL"; then
+        rm -f -- "$menu_tmp" "$installer_tmp"
+        echo -e "${red}下载校验信息失败，请稍后重试${plain}"
+        return 1
+    fi
+    if ! bash -n "$menu_tmp" || ! bash -n "$installer_tmp"; then
+        rm -f -- "$menu_tmp" "$installer_tmp"
+        echo -e "${red}下载的脚本语法校验失败${plain}"
+        return 1
+    fi
+    expected_sha=$(sed -n "s/^readonly MENU_SHA256='\([0-9a-f]\{64\}\)'$/\1/p" "$installer_tmp")
+    actual_sha=$(sha256sum "$menu_tmp" | awk '{print $1}')
+    rm -f -- "$installer_tmp"
+    if [[ ${#expected_sha} -ne 64 || "$actual_sha" != "$expected_sha" ]]; then
+        rm -f -- "$menu_tmp"
+        echo -e "${red}管理脚本 SHA-256 校验失败，请稍后重试${plain}"
+        return 1
+    fi
+    if ! chmod 755 "$menu_tmp" || ! mv -f -- "$menu_tmp" /usr/bin/v2node; then
+        rm -f -- "$menu_tmp"
+        echo -e "${red}替换管理脚本失败${plain}"
+        return 1
+    fi
+    echo -e "${green}升级脚本成功，请重新运行脚本${plain}"
+    exit 0
 }
 
 # 0: running, 1: not running, 2: not installed
@@ -331,8 +396,7 @@ check_status() {
             return 1
         fi
     else
-        temp=$(systemctl status v2node | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
-        if [[ x"${temp}" == x"running" ]]; then
+        if systemctl is-active --quiet v2node; then
             return 0
         else
             return 1
@@ -425,6 +489,27 @@ generate_v2node_config() {
         local node_id="$2"
         local api_key="$3"
 
+        if [[ ! "$api_host" =~ ^https?://[^[:space:]\"]+/?$ ]]; then
+            echo -e "${red}面板 API 地址必须是有效的 http:// 或 https:// 地址${plain}"
+            return 1
+        fi
+        if [[ ! "$node_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo -e "${red}节点 ID 必须是正整数${plain}"
+            return 1
+        fi
+        if [[ "$api_host" =~ [[:cntrl:]] ]]; then
+            echo -e "${red}面板 API 地址不能包含控制字符${plain}"
+            return 1
+        fi
+        if [[ -z "$api_key" || "$api_key" =~ [[:cntrl:]] ]]; then
+            echo -e "${red}节点通讯密钥不能为空或包含控制字符${plain}"
+            return 1
+        fi
+        api_host=${api_host//\\/\\\\}
+        api_host=${api_host//\"/\\\"}
+        api_key=${api_key//\\/\\\\}
+        api_key=${api_key//\"/\\\"}
+
         mkdir -p /etc/v2node >/dev/null 2>&1
         cat > /etc/v2node/config.json <<EOF
 {
@@ -432,6 +517,15 @@ generate_v2node_config() {
         "Level": "warning",
         "Output": "",
         "Access": "none"
+    },
+    "Runtime": {
+        "MinPollIntervalSeconds": 30,
+        "MaxPollIntervalSeconds": 3600,
+        "BufferSizeKB": 64,
+        "MaxTrackedIPsPerUser": 256,
+        "MaxTrackedIPsPerNode": 32768,
+        "MaxPanelResponseBytes": 16777216,
+        "MaxUsers": 100000
     },
     "Nodes": [
         {
@@ -443,16 +537,20 @@ generate_v2node_config() {
     ]
 }
 EOF
+        chmod 600 /etc/v2node/config.json
         echo -e "${green}V2node 配置文件生成完成,正在重新启动服务${plain}"
         if [[ x"${release}" == x"alpine" ]]; then
+            rc-update add v2node default >/dev/null 2>&1
             service v2node restart
         else
+            systemctl enable v2node >/dev/null 2>&1
             systemctl restart v2node
         fi
         sleep 2
         check_status
+        local status=$?
         echo -e ""
-        if [[ $? == 0 ]]; then
+        if [[ $status == 0 ]]; then
             echo -e "${green}v2node 重启成功${plain}"
         else
             echo -e "${red}v2node 可能启动失败，请使用 v2node log 查看日志信息${plain}"
@@ -502,8 +600,8 @@ show_usage() {
     echo "v2node log          - 查看 v2node 日志"
     echo "v2node x25519       - 生成 x25519 密钥"
     echo "v2node generate     - 生成 v2node 配置文件"
-    echo "v2node update       - 更新 v2node"
-    echo "v2node update x.x.x - 安装 v2node 指定版本"
+    echo "v2node update                 - 重装/更新至 v0.4.4-ram5"
+    echo "v2node update v0.4.4-ram5     - 安装固定 ram5 版本"
     echo "v2node install      - 安装 v2node"
     echo "v2node uninstall    - 卸载 v2node"
     echo "v2node version      - 查看 v2node 版本"
@@ -513,7 +611,7 @@ show_usage() {
 show_menu() {
     echo -e "
   ${green}v2node 后端管理脚本，${plain}${red}不适用于docker${plain}
---- https://github.com/wyx2685/v2node ---
+--- https://github.com/Duyvj/v2node/tree/upgraded-v0.4.4 ---
   ${green}0.${plain} 修改配置
 ————————————————
   ${green}1.${plain} 安装 v2node
@@ -570,8 +668,8 @@ if [[ $# > 0 ]]; then
         "enable") check_install 0 && enable 0 ;;
         "disable") check_install 0 && disable 0 ;;
         "log") check_install 0 && show_log 0 ;;
-        "update") check_install 0 && update 0 $2 ;;
-        "config") config $* ;;
+        "update") check_install 0 && update 0 "${2:-}" ;;
+        "config") config "$@" ;;
         "generate") generate_config_file ;;
         "install") check_uninstall 0 && install 0 ;;
         "uninstall") check_install 0 && uninstall 0 ;;

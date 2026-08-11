@@ -1,5 +1,9 @@
 # v0.4.4-ram5
 
+> Ghi chú: nội dung dưới đây mô tả release binary/tag `v0.4.4-ram5` lịch sử.
+> Nhánh `upgraded-v0.4.4` hiện có installer standalone; xem `README.md` để cài
+> trực tiếp trên VPS trắng. Tag và các asset ram5 hiện có không bị thay đổi.
+
 RAM-fix overlay dựa trực tiếp trên `wyx2685/v2node` `v0.4.4`
 (`2daa9dd4a114aa39294350475defa2b748d595ed`). Protocol, routing, sniffing,
 panel API, quản lý user và định dạng report traffic giữ nguyên baseline.
