@@ -9,25 +9,25 @@
 5. Chỉ triển khai toàn fleet khi batch nhỏ ổn định.
 
 Luôn pin tag, URL và SHA-256 cho overlay. Không dùng release `latest`. Installer
-`v0.4.4-ram3` đã pin sẵn asset + hash theo kiến trúc nên cùng một lệnh có thể dùng
+`v0.4.4-ram4` đã pin sẵn asset + hash theo kiến trúc nên cùng một lệnh có thể dùng
 cho cả fleet `amd64` và `arm64`.
 
 ## Lệnh cài pin theo tag
 
 ```bash
 wget -O /root/v2node-install.sh \
-  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram3/script/install.sh
+  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram4/script/install.sh
 chmod 700 /root/v2node-install.sh
 sudo /root/v2node-install.sh
 ```
 
 Overlay từ chối chạy nếu VPS chưa có đầy đủ binary, config, menu và service của bản gốc.
 
-## Hash release v0.4.4-ram3
+## Hash release v0.4.4-ram4
 
 ```text
-amd64  47cad5ad7737a2872d4b5e54f885e79cc8f750a454f259bb8a9235c6d3c79c58
-arm64  3d8894cf5a2306522168959f6448a4f3d83735d386363742b256b36d2332370c
+amd64  783183398c053c41571881ca3c22bbbdd40ad59628312cb9d16056bdc9a8af9a
+arm64  2b9705727595ce2f08790a3b1411dcce55840005b75340a92a41afb26cf7a8d7
 ```
 
 Trong canary, theo dõi ít nhất RSS/cgroup memory, số goroutine, connection hiện

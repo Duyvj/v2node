@@ -1,4 +1,4 @@
-# RAM-only patch set v0.4.4-ram3
+# RAM-only patch set v0.4.4-ram4
 
 Baseline: upstream `wyx2685/v2node` tag `v0.4.4`, commit
 `2daa9dd4a114aa39294350475defa2b748d595ed`.
@@ -77,11 +77,12 @@ User không có device limit vẫn được kết nối khi IP tracker đầy; c
 hạn chỉ không được giữ lại để report. User có device limit bị từ chối khi không thể
 theo dõi thêm IP một cách an toàn.
 
-Drop-in systemd tính các ngưỡng từ RAM/cgroup hiệu dụng: `GOMEMLIMIT` khoảng 45%,
-`MemoryHigh` 65%, `MemoryMax` 80%, và `MemorySwapMax` 10% nhưng được clamp trong
-khoảng 128–512 MiB. Installer xác minh systemd đã áp dụng đúng các giá trị này.
-Trần cứng khiến systemd restart riêng service thay vì để v2node làm cạn RAM/swap
-của cả VPS.
+Drop-in systemd dùng profile capacity thích ứng. Nó chừa cho host
+`max(384 MiB, 15% RAM/cgroup hiệu dụng)` nhưng không quá 25% tổng RAM trên máy nhỏ;
+`MemoryMax` là phần còn lại. `GOMEMLIMIT` chừa tối thiểu 256 MiB hoặc 10% trần
+service, còn `MemoryHigh` chừa tối thiểu 128 MiB hoặc 5%. Nhờ vậy GC/reclaim không
+can thiệp sớm khi nhiều người dùng đồng thời, trong khi trần cứng vẫn khiến systemd
+restart riêng service thay vì để v2node làm cạn RAM/swap của cả VPS.
 
 ## Cài đè và rollback
 

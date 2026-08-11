@@ -1,32 +1,48 @@
-# v0.4.4-ram3
+# v0.4.4-ram4
 
 RAM-fix overlay dựa trực tiếp trên `wyx2685/v2node` `v0.4.4`
 (`2daa9dd4a114aa39294350475defa2b748d595ed`). Protocol, routing, sniffing,
 panel API, quản lý user và định dạng report traffic giữ nguyên baseline.
 
-Thay đổi so với `ram2`: release này trở lại đúng mô hình cài đè bản gốc.
+## Thay đổi so với ram3
 
-- Chỉ thay `/usr/local/v2node/v2node` bằng binary đã vá RAM.
-- Chỉ thêm systemd drop-in `90-v2node-ramfix.conf` với `GOMEMLIMIT` khoảng 45%,
-  `MemoryHigh` 65%, `MemoryMax` 80% và `MemorySwapMax` 10% RAM/cgroup hiệu dụng.
-- Không thay `/usr/bin/v2node`, config, geodata hoặc file `v2node.service` chính.
-- Không tạo `current/releases`, swap, sysctl hay lệnh quản lý mới.
-- Toàn bộ thao tác quản lý tiếp tục dùng `v2node`, giống hệt bản gốc.
-- Nếu phát hiện layout `ram1/ram2`, installer dừng trước mọi thay đổi và yêu cầu cài
-  lại upstream `v0.4.4`; nó không tự rollback layout cũ vì có thể ghi đè config mới.
+`ram3` dùng các tỷ lệ cố định `45% / 65% / 80%`. Trên VPS có nhiều kết nối,
+`GOMEMLIMIT=45%` có thể làm Go GC chạy dày sớm và `MemoryHigh=65%` có thể kích
+hoạt reclaim/throttling trước khi máy thực sự thiếu RAM.
 
-Binary vẫn chứa đầy đủ các sửa lỗi RAM của nhánh trước:
+`ram4` chuyển sang profile capacity thích ứng:
 
-- giới hạn online-IP, cache Shadowsocks, session/queue/packet/fragment;
-- đóng đúng goroutine, timer, watcher, stream, socket và transport;
-- scheduler phân biệt deadline riêng của request panel;
-- browser dialer dùng queue theo thế hệ, backoff và same-origin;
-- reload thay process sau graceful cleanup để thu hồi heap của core cũ;
-- buffer mặc định 64 KiB và bỏ user-stat Xray trùng lặp.
+- chừa cho hệ điều hành `max(384 MiB, 15% RAM/cgroup hiệu dụng)`, nhưng không quá
+  25% tổng RAM trên VPS nhỏ;
+- `MemoryMax` là phần RAM còn lại sau host reserve;
+- `GOMEMLIMIT` thấp hơn trần service tối thiểu 256 MiB hoặc 10%;
+- `MemoryHigh` thấp hơn trần service tối thiểu 128 MiB hoặc 5%, nên chỉ là ngưỡng
+  áp lực gần khẩn cấp thay vì can thiệp sớm;
+- `MemorySwapMax` giữ 10%, clamp 128–512 MiB và không tự tạo swap.
 
-Installer pin tag + SHA-256, kiểm tra cấu trúc ZIP/ELF, tạo backup format 3,
-tự xác minh backup trước khi dừng service, health-check sau cài và tự rollback khi lỗi.
-Các file thuộc bản gốc được snapshot hash + metadata và phải giữ nguyên qua giao dịch.
+| RAM hiệu dụng | Host reserve | GOMEMLIMIT | MemoryHigh | MemoryMax |
+|---:|---:|---:|---:|---:|
+| 2 GiB | 384 MiB | 1408 MiB | 1536 MiB | 1664 MiB |
+| 4 GiB | 614 MiB | 3134 MiB | 3308 MiB | 3482 MiB |
+
+Profile mới cho phép heap/working set lớn hơn rõ rệt khi nhiều người dùng đồng thời,
+nhưng vẫn giữ trần khẩn cấp để tránh một service làm cạn RAM toàn VPS. Chạm
+`MemoryMax` vẫn có thể khiến systemd restart v2node và rớt phiên; đây là lớp bảo vệ
+cuối, không phải ngưỡng vận hành bình thường.
+
+Nếu config đang đặt `Runtime.MemoryLimit`, giá trị đó vẫn được tôn trọng và thay
+`GOMEMLIMIT` của drop-in. Cần chạy lại installer sau khi resize RAM VPS.
+
+## Phạm vi không đổi
+
+- Chỉ thay `/usr/local/v2node/v2node` và drop-in `90-v2node-ramfix.conf`.
+- Không thay `/usr/bin/v2node`, config, geodata hoặc file service chính.
+- Không tạo `current/releases`, swap, sysctl hay CLI mới.
+- Quản lý tiếp tục dùng lệnh `v2node` của bản gốc.
+- Toàn bộ giới hạn state, cleanup goroutine/timer/socket/transport và các sửa race
+  của ram3 vẫn được giữ nguyên.
+- Máy đang chạy ram3 có thể cài đè trực tiếp; layout ram1/ram2 vẫn phải được đưa về
+  upstream `v0.4.4` trước.
 
 Rollback overlay:
 
@@ -34,4 +50,4 @@ Rollback overlay:
 sudo /usr/local/lib/v2node-ramfix/install.sh --rollback
 ```
 
-Nên triển khai một VPS canary cho mỗi kiến trúc trước khi rollout toàn bộ fleet.
+Nên kiểm thử một VPS canary với đúng lượng người dùng cao điểm trước khi rollout.

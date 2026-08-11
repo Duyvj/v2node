@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly VERSION="v0.4.4-ram3"
+readonly VERSION="v0.4.4-ram4"
 readonly ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 readonly OUT_DIR="${ROOT}/artifacts"
 readonly GO_VERSION_REQUIRED="go1.26.1"

@@ -14,7 +14,33 @@ fail() {
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
 
-# Every supported memory size must preserve Go heap < soft pressure < hard cap.
+# Cgroup fixtures must select the tightest real limit and must not turn a
+# sub-MiB limit into an unlimited-host fallback.
+MEMINFO_FILE="$tmp/meminfo"
+CGROUP_V2_MEMORY_MAX_FILE="$tmp/memory.max"
+CGROUP_V1_MEMORY_LIMIT_FILE="$tmp/memory.limit_in_bytes"
+printf 'MemTotal:       4194304 kB\n' > "$MEMINFO_FILE"
+printf 'max\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
+[[ "$(effective_memory_mib)" == 4096 ]] || fail 'unlimited cgroup-v2 did not use host RAM'
+printf '2147483648\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
+[[ "$(effective_memory_mib)" == 2048 ]] || fail 'cgroup-v2 limit did not override host RAM'
+printf '268435456\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
+[[ "$(effective_memory_mib)" == 256 ]] || fail 'exact 256 MiB cgroup limit was parsed incorrectly'
+printf '268435455\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
+[[ "$(effective_memory_mib)" == 255 ]] || fail 'sub-256 MiB cgroup limit was rounded up'
+printf '524288\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
+[[ "$(effective_memory_mib)" == 0 ]] || fail 'sub-MiB cgroup limit fell back to host RAM'
+if (resource_profile >/dev/null 2>&1); then
+  fail 'sub-MiB cgroup limit was accepted'
+fi
+rm -f "$CGROUP_V2_MEMORY_MAX_FILE"
+printf '9223372036854771712\n' > "$CGROUP_V1_MEMORY_LIMIT_FILE"
+[[ "$(effective_memory_mib)" == 4096 ]] || fail 'unlimited cgroup-v1 sentinel did not use host RAM'
+printf '1073741824\n' > "$CGROUP_V1_MEMORY_LIMIT_FILE"
+[[ "$(effective_memory_mib)" == 1024 ]] || fail 'cgroup-v1 limit did not override host RAM'
+
+# Every supported memory size must preserve Go heap < soft pressure < hard cap,
+# reserve the documented host headroom and keep swap bounded.
 for test_mem in 256 479 480 767 768 1279 1280 1599 1600 2048 4096; do
   effective_memory_mib() { printf '%s\n' "$test_mem"; }
   resource_profile >/dev/null
@@ -22,7 +48,81 @@ for test_mem in 256 479 480 767 768 1279 1280 1599 1600 2048 4096; do
     fail "invalid memory ordering at ${test_mem} MiB"
   (( MEMORY_SWAP_MAX_MIB >= 128 && MEMORY_SWAP_MAX_MIB <= 512 )) ||
     fail "invalid swap ceiling at ${test_mem} MiB"
+  expected_reserve=$((test_mem * 15 / 100))
+  (( expected_reserve >= 384 )) || expected_reserve=384
+  max_reserve=$((test_mem / 4))
+  (( expected_reserve <= max_reserve )) || expected_reserve=$max_reserve
+  (( HOST_RESERVE_MIB == expected_reserve )) ||
+    fail "wrong host reserve at ${test_mem} MiB"
+  (( MEMORY_MAX_MIB + HOST_RESERVE_MIB == test_mem )) ||
+    fail "memory cap does not preserve host reserve at ${test_mem} MiB"
 done
+
+assert_profile() {
+  local test_mem="$1" expected_reserve="$2" expected_go="$3"
+  local expected_high="$4" expected_max="$5" expected_swap="$6"
+  effective_memory_mib() { printf '%s\n' "$test_mem"; }
+  resource_profile >/dev/null
+  [[ "$HOST_RESERVE_MIB:$GOMEMLIMIT_MIB:$MEMORY_HIGH_MIB:$MEMORY_MAX_MIB:$MEMORY_SWAP_MAX_MIB" == "$expected_reserve:$expected_go:$expected_high:$expected_max:$expected_swap" ]] ||
+    fail "unexpected capacity profile at ${test_mem} MiB"
+}
+
+assert_profile 256 64 128 144 192 128
+assert_profile 512 128 256 288 384 128
+assert_profile 1024 256 512 640 768 128
+assert_profile 1536 384 896 1024 1152 153
+assert_profile 2048 384 1408 1536 1664 204
+assert_profile 3072 460 2351 2482 2612 307
+assert_profile 4096 614 3134 3308 3482 409
+assert_profile 8192 1228 6268 6616 6964 512
+
+effective_memory_mib() { printf '255\n'; }
+if (resource_profile >/dev/null 2>&1); then
+  fail '255 MiB effective RAM was accepted'
+fi
+assert_profile 681 170 341 384 511 128
+assert_profile 682 170 342 384 512 128
+assert_profile 1023 255 512 640 768 128
+assert_profile 1289 322 711 839 967 128
+assert_profile 1290 322 712 840 968 129
+assert_profile 1535 383 896 1024 1152 153
+assert_profile 2566 384 1926 2054 2182 256
+assert_profile 2567 385 1926 2054 2182 256
+assert_profile 3022 453 2313 2441 2569 302
+assert_profile 3023 453 2313 2442 2570 302
+assert_profile 3034 455 2322 2451 2579 303
+assert_profile 3035 455 2322 2451 2580 303
+assert_profile 5119 767 3917 4135 4352 511
+assert_profile 5120 768 3917 4135 4352 512
+assert_profile 5130 769 3925 4143 4361 512
+
+# Profile verification must match the exact environment key, not a substring.
+test_mem=2048
+effective_memory_mib() { printf '%s\n' "$test_mem"; }
+resource_profile >/dev/null
+MOCK_ENVIRONMENT="NOT_GOMEMLIMIT=${GOMEMLIMIT}"
+systemctl() {
+  local prop='' arg next=0
+  for arg in "$@"; do
+    if (( next == 1 )); then prop="$arg"; break; fi
+    [[ "$arg" == -p ]] && next=1
+  done
+  case "$prop" in
+    MemoryHigh) printf '%s\n' "$((MEMORY_HIGH_MIB * 1024 * 1024))" ;;
+    MemoryMax) printf '%s\n' "$((MEMORY_MAX_MIB * 1024 * 1024))" ;;
+    MemorySwapMax) printf '%s\n' "$((MEMORY_SWAP_MAX_MIB * 1024 * 1024))" ;;
+    Environment) printf '%s\n' "$MOCK_ENVIRONMENT" ;;
+    EffectiveMemoryHigh) printf '%s\n' "$((MEMORY_HIGH_MIB * 1024 * 1024 - 1))" ;;
+    EffectiveMemoryMax) printf '%s\n' "$((MEMORY_MAX_MIB * 1024 * 1024 - 1))" ;;
+    *) return 1 ;;
+  esac
+}
+if (verify_service_profile >/dev/null 2>&1); then
+  fail 'profile verifier accepted NOT_GOMEMLIMIT as GOMEMLIMIT'
+fi
+MOCK_ENVIRONMENT="FOO=1 GOMEMLIMIT=${GOMEMLIMIT} BAR=2"
+verify_service_profile >/dev/null 2>&1 || fail 'profile verifier rejected the exact GOMEMLIMIT assignment'
+unset -f systemctl
 
 # Health validation must reject a service that repeatedly changes PID (flapping).
 printf '0\n' > "$tmp/health-counter"
@@ -126,7 +226,7 @@ grep -Fq 'snapshot_path "$fragment" service' "$ROOT/deploy/install.sh" || fail '
 grep -Fq 'MemoryHigh=${MEMORY_HIGH}' "$ROOT/deploy/install.sh" || fail 'MemoryHigh is missing'
 grep -Fq 'MemoryMax=${MEMORY_MAX}' "$ROOT/deploy/install.sh" || fail 'MemoryMax is missing'
 grep -Fq 'MemorySwapMax=${MEMORY_SWAP_MAX}' "$ROOT/deploy/install.sh" || fail 'MemorySwapMax is missing'
-grep -Fq 'v0.4.4|v0.4.4-ram3)' "$ROOT/deploy/install.sh" || fail 'upstream-version gate is missing'
+grep -Fq 'v0.4.4|v0.4.4-ram3|v0.4.4-ram4)' "$ROOT/deploy/install.sh" || fail 'upstream-version gate is missing'
 grep -Fq 'set -o noclobber' "$ROOT/deploy/install.sh" || fail 'lock creation is not symlink-safe'
 grep -Fq 'exec 9<>"$LOCK_FILE"' "$ROOT/deploy/install.sh" || fail 'lock file is opened with a truncating mode'
 if grep -Eq 'CURRENT_LINK|RELEASES_DIR|v2node-menu|v2nodectl|/swapfile|SYSCTL_FILE|write_service\(' "$ROOT/deploy/install.sh"; then

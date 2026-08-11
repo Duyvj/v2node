@@ -4,7 +4,7 @@ IFS=$'\n\t'
 
 readonly ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 readonly ARTIFACTS="${1:-$ROOT/artifacts}"
-readonly VERSION="v0.4.4-ram3"
+readonly VERSION="v0.4.4-ram4"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -26,6 +26,8 @@ sha_arm64="$(sed -n 's/^readonly DEFAULT_SHA256_ARM64="\([0-9a-f]\{64\}\)"$/\1/p
 expected_entries="$(printf '%s\n' BUILDINFO LICENSE VERSION v2node | sort)"
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
+size64=0
+size_arm64=0
 
 for target in '64' 'arm64-v8a'; do
   archive="$ARTIFACTS/v2node-linux-${target}.zip"
@@ -45,16 +47,28 @@ for target in '64' 'arm64-v8a'; do
   actual_sha="$(sha256sum "$archive" | awk '{print $1}')"
   if [[ "$target" == 64 ]]; then
     [[ "$actual_sha" == "$sha64" ]] || fail 'amd64 installer hash mismatch'
+    size64="$(stat -c %s "$archive")"
   else
     [[ "$actual_sha" == "$sha_arm64" ]] || fail 'arm64 installer hash mismatch'
+    size_arm64="$(stat -c %s "$archive")"
   fi
 done
 
 (cd "$ARTIFACTS" && sha256sum --check --status SHA256SUMS) || fail 'artifact SHA256SUMS verification failed'
 cmp -s "$ARTIFACTS/SHA256SUMS" "$ROOT/SHA256SUMS" || fail 'root checksum file differs'
 cmp -s "$ARTIFACTS/SHA256SUMS" "$ROOT/release/SHA256SUMS" || fail 'release checksum file differs'
-grep -Fq '"version": "v0.4.4-ram3"' "$ROOT/release/manifest.json" || fail 'manifest version mismatch'
+grep -Fq '"version": "v0.4.4-ram4"' "$ROOT/release/manifest.json" || fail 'manifest version mismatch'
 grep -Fq "$sha64" "$ROOT/release/manifest.json" || fail 'manifest lacks amd64 hash'
 grep -Fq "$sha_arm64" "$ROOT/release/manifest.json" || fail 'manifest lacks arm64 hash'
+grep -Fq "\"size\": $size64" "$ROOT/release/manifest.json" || fail 'manifest lacks amd64 size'
+grep -Fq "\"size\": $size_arm64" "$ROOT/release/manifest.json" || fail 'manifest lacks arm64 size'
+grep -Fq '"name": "v2node-v0.4.4-ram4-source.zip"' "$ROOT/release/manifest.json" || fail 'manifest source bundle mismatch'
+grep -Fxq "version=$VERSION" "$ROOT/BUILDINFO" || fail 'BUILDINFO version mismatch'
+grep -Fq "readonly VERSION=\"$VERSION\"" "$ROOT/build/build.sh" || fail 'build script version mismatch'
+grep -Fq "ARG VERSION=$VERSION" "$ROOT/Dockerfile" || fail 'Docker version mismatch'
+grep -Fq "readonly DEFAULT_VERSION=\"$VERSION\"" "$ROOT/deploy/install.sh" || fail 'installer version mismatch'
+grep -Fq "$VERSION" "$ROOT/docs/FLEET_DEPLOYMENT.md" || fail 'fleet guide version mismatch'
+grep -Fq "$sha64" "$ROOT/docs/FLEET_DEPLOYMENT.md" || fail 'fleet guide lacks amd64 hash'
+grep -Fq "$sha_arm64" "$ROOT/docs/FLEET_DEPLOYMENT.md" || fail 'fleet guide lacks arm64 hash'
 
 printf 'PASS: minimal immutable RAM-fix archives and checksums agree\n'

@@ -7,10 +7,10 @@ IFS=$'\n\t'
 umask 077
 
 readonly PRODUCT="v2node"
-readonly DEFAULT_VERSION="v0.4.4-ram3"
+readonly DEFAULT_VERSION="v0.4.4-ram4"
 readonly RELEASE_REPOSITORY="https://github.com/Duyvj/v2node"
-readonly DEFAULT_SHA256_64="47cad5ad7737a2872d4b5e54f885e79cc8f750a454f259bb8a9235c6d3c79c58"
-readonly DEFAULT_SHA256_ARM64="3d8894cf5a2306522168959f6448a4f3d83735d386363742b256b36d2332370c"
+readonly DEFAULT_SHA256_64="783183398c053c41571881ca3c22bbbdd40ad59628312cb9d16056bdc9a8af9a"
+readonly DEFAULT_SHA256_ARM64="2b9705727595ce2f08790a3b1411dcce55840005b75340a92a41afb26cf7a8d7"
 readonly ORIGINAL_ROOT="/usr/local/v2node"
 readonly ORIGINAL_BINARY="${ORIGINAL_ROOT}/v2node"
 readonly CONFIG_FILE="/etc/v2node/config.json"
@@ -46,6 +46,11 @@ GOMEMLIMIT_MIB=0
 MEMORY_HIGH_MIB=0
 MEMORY_MAX_MIB=0
 MEMORY_SWAP_MAX_MIB=0
+HOST_RESERVE_MIB=0
+
+MEMINFO_FILE="/proc/meminfo"
+CGROUP_V2_MEMORY_MAX_FILE="/sys/fs/cgroup/memory.max"
+CGROUP_V1_MEMORY_LIMIT_FILE="/sys/fs/cgroup/memory/memory.limit_in_bytes"
 
 log()  { printf '[%s] %s\n' "$PRODUCT" "$*"; }
 warn() { printf '[%s] WARNING: %s\n' "$PRODUCT" "$*" >&2; }
@@ -65,7 +70,7 @@ Options:
   --package FILE             Use a local release ZIP (requires --sha256)
   --package-url HTTPS_URL    Use a custom HTTPS ZIP (requires --sha256)
   --sha256 HASH              Exact SHA-256 for a custom package
-  --version VERSION          Release label (default: v0.4.4-ram3)
+  --version VERSION          Release label (default: v0.4.4-ram4)
   --keep-backups N           Retain N committed backups (default: 3)
   --rollback                 Restore the state before the latest overlay
   -h, --help                 Show this help
@@ -122,21 +127,23 @@ select_default_package() {
 }
 
 effective_memory_mib() {
-  local value mem_total=0 cgroup_limit=0
-  mem_total="$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)"
-  if [[ -r /sys/fs/cgroup/memory.max ]]; then
-    value="$(cat /sys/fs/cgroup/memory.max)"
+  local value mem_total=0 cgroup_limit=0 cgroup_limited=0
+  mem_total="$(awk '/^MemTotal:/ { print int($2 / 1024) }' "$MEMINFO_FILE")"
+  if [[ -r "$CGROUP_V2_MEMORY_MAX_FILE" ]]; then
+    value="$(cat "$CGROUP_V2_MEMORY_MAX_FILE")"
     if [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 )); then
       cgroup_limit=$((value / 1024 / 1024))
+      cgroup_limited=1
     fi
   fi
-  if (( cgroup_limit == 0 )) && [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
-    value="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+  if (( cgroup_limited == 0 )) && [[ -r "$CGROUP_V1_MEMORY_LIMIT_FILE" ]]; then
+    value="$(cat "$CGROUP_V1_MEMORY_LIMIT_FILE")"
     if [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 && value < 9223372036854771712 )); then
       cgroup_limit=$((value / 1024 / 1024))
+      cgroup_limited=1
     fi
   fi
-  if (( cgroup_limit > 0 && (mem_total == 0 || cgroup_limit < mem_total) )); then
+  if (( cgroup_limited == 1 && (mem_total == 0 || cgroup_limit < mem_total) )); then
     printf '%s\n' "$cgroup_limit"
   else
     printf '%s\n' "$mem_total"
@@ -144,12 +151,35 @@ effective_memory_mib() {
 }
 
 resource_profile() {
-  local mem
+  local mem max_reserve high_headroom max_high_headroom go_headroom max_go_headroom
   mem="$(effective_memory_mib)"
   (( mem >= 256 )) || die "at least 256 MiB effective memory is required (detected ${mem} MiB)"
-  GOMEMLIMIT_MIB=$((mem * 45 / 100))
-  MEMORY_HIGH_MIB=$((mem * 65 / 100))
-  MEMORY_MAX_MIB=$((mem * 80 / 100))
+
+  # Capacity-oriented profile: reserve enough memory for the OS, but do not
+  # penalize small VPSes by reserving more than one quarter of effective RAM.
+  HOST_RESERVE_MIB=$((mem * 15 / 100))
+  (( HOST_RESERVE_MIB >= 384 )) || HOST_RESERVE_MIB=384
+  max_reserve=$((mem / 4))
+  (( HOST_RESERVE_MIB <= max_reserve )) || HOST_RESERVE_MIB=$max_reserve
+  MEMORY_MAX_MIB=$((mem - HOST_RESERVE_MIB))
+
+  # MemoryHigh is an emergency pressure threshold, not the normal operating
+  # target. Keep it close to MemoryMax so legitimate concurrent traffic is not
+  # throttled early.
+  high_headroom=$((MEMORY_MAX_MIB * 5 / 100))
+  (( high_headroom >= 128 )) || high_headroom=128
+  max_high_headroom=$((MEMORY_MAX_MIB / 4))
+  (( high_headroom <= max_high_headroom )) || high_headroom=$max_high_headroom
+  MEMORY_HIGH_MIB=$((MEMORY_MAX_MIB - high_headroom))
+
+  # Leave non-heap/runtime/socket headroom below the cgroup pressure threshold
+  # while allowing the Go collector to use materially more memory under load.
+  go_headroom=$((MEMORY_MAX_MIB * 10 / 100))
+  (( go_headroom >= 256 )) || go_headroom=256
+  max_go_headroom=$((MEMORY_MAX_MIB / 3))
+  (( go_headroom <= max_go_headroom )) || go_headroom=$max_go_headroom
+  GOMEMLIMIT_MIB=$((MEMORY_MAX_MIB - go_headroom))
+
   MEMORY_SWAP_MAX_MIB=$((mem * 10 / 100))
   (( MEMORY_SWAP_MAX_MIB >= 128 )) || MEMORY_SWAP_MAX_MIB=128
   (( MEMORY_SWAP_MAX_MIB <= 512 )) || MEMORY_SWAP_MAX_MIB=512
@@ -159,7 +189,7 @@ resource_profile() {
   MEMORY_HIGH="${MEMORY_HIGH_MIB}M"
   MEMORY_MAX="${MEMORY_MAX_MIB}M"
   MEMORY_SWAP_MAX="${MEMORY_SWAP_MAX_MIB}M"
-  log "effective memory: ${mem} MiB; GOMEMLIMIT=${GOMEMLIMIT}; MemoryHigh=${MEMORY_HIGH}; MemoryMax=${MEMORY_MAX}; MemorySwapMax=${MEMORY_SWAP_MAX}"
+  log "effective memory: ${mem} MiB; host reserve=${HOST_RESERVE_MIB} MiB; GOMEMLIMIT=${GOMEMLIMIT}; MemoryHigh=${MEMORY_HIGH}; MemoryMax=${MEMORY_MAX}; MemorySwapMax=${MEMORY_SWAP_MAX}"
 }
 
 sha256_file() {
@@ -192,7 +222,7 @@ validate_original_install() {
   version_output="$("$ORIGINAL_BINARY" version 2>/dev/null || true)"
   installed_version="$(awk 'NR == 1 { print $2 }' <<<"$version_output")"
   case "$installed_version" in
-    v0.4.4|v0.4.4-ram3) ;;
+    v0.4.4|v0.4.4-ram3|v0.4.4-ram4) ;;
     "") die 'could not determine the installed upstream v2node version' ;;
     *) die "this RAM fix is pinned to upstream v0.4.4, but the installed binary reports $installed_version" ;;
   esac
@@ -469,7 +499,7 @@ EOF
 }
 
 verify_service_profile() {
-  local actual_high actual_max actual_swap environment
+  local actual_high actual_max actual_swap environment effective_high effective_max
   actual_high="$(systemctl show "$SERVICE_NAME" -p MemoryHigh --value)"
   actual_max="$(systemctl show "$SERVICE_NAME" -p MemoryMax --value)"
   actual_swap="$(systemctl show "$SERVICE_NAME" -p MemorySwapMax --value)"
@@ -477,7 +507,15 @@ verify_service_profile() {
   [[ "$actual_high" == "$((MEMORY_HIGH_MIB * 1024 * 1024))" ]] || die 'systemd did not apply MemoryHigh'
   [[ "$actual_max" == "$((MEMORY_MAX_MIB * 1024 * 1024))" ]] || die 'systemd did not apply MemoryMax'
   [[ "$actual_swap" == "$((MEMORY_SWAP_MAX_MIB * 1024 * 1024))" ]] || die 'systemd did not apply MemorySwapMax'
-  [[ "$environment" == *"GOMEMLIMIT=${GOMEMLIMIT}"* ]] || die 'systemd did not apply GOMEMLIMIT'
+  [[ " $environment " == *" GOMEMLIMIT=${GOMEMLIMIT} "* ]] || die 'systemd did not apply GOMEMLIMIT'
+  effective_high="$(systemctl show "$SERVICE_NAME" -p EffectiveMemoryHigh --value 2>/dev/null || true)"
+  effective_max="$(systemctl show "$SERVICE_NAME" -p EffectiveMemoryMax --value 2>/dev/null || true)"
+  if [[ "$effective_high" =~ ^[0-9]+$ ]] && (( effective_high < MEMORY_HIGH_MIB * 1024 * 1024 )); then
+    warn "a parent cgroup lowers EffectiveMemoryHigh to $effective_high bytes"
+  fi
+  if [[ "$effective_max" =~ ^[0-9]+$ ]] && (( effective_max < MEMORY_MAX_MIB * 1024 * 1024 )); then
+    warn "a parent cgroup lowers EffectiveMemoryMax to $effective_max bytes"
+  fi
 }
 
 health_check() {
