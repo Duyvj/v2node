@@ -1,4 +1,4 @@
-# v2node-personal v0.4.4-ram2
+# v2node v0.4.4-ram3 — RAM fix overlay
 
 Bản mod RAM-only từ [wyx2685/v2node](https://github.com/wyx2685/v2node)
 `v0.4.4`, dành cho nhiều VPS nhỏ và máy chạy lâu ngày. Protocol, routing,
@@ -34,56 +34,60 @@ Nếu VPS đã cài bản gốc bằng `wyx2685/v2node` và có
 `/etc/v2node/config.json` hợp lệ, chỉ cần chạy:
 
 ```bash
-wget -O /root/v2node-personal-ram2.sh \
-  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram2/script/install.sh
-chmod 700 /root/v2node-personal-ram2.sh
-sudo /root/v2node-personal-ram2.sh
+wget -O /root/v2node-ramfix.sh \
+  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram3/script/install.sh
+chmod 700 /root/v2node-ramfix.sh
+sudo /root/v2node-ramfix.sh
 ```
 
-Installer giữ nguyên từng byte và metadata của config đang dùng, lưu service/binary/
-geodata/menu cũ vào `/var/backups/v2node`, dừng service cũ trước khi đổi file live,
-cài release mới qua symlink nguyên tử rồi health-check trước khi commit. Nếu service
-mới không ổn định, toàn bộ layout bản gốc được khôi phục tự động. Các đường dẫn cũ
-`/usr/local/v2node/v2node`, `geoip.dat`,
-`geosite.dat` và lệnh `v2node` vẫn hoạt động nên panel/VPN không phải đổi cấu hình.
+Đây chỉ là overlay, không phải bộ cài v2node mới. Installer yêu cầu bản gốc đã có
+binary, config, menu và `v2node.service`; nó chỉ thay nguyên tử
+`/usr/local/v2node/v2node` bằng binary RAM fix và thêm drop-in
+`/etc/systemd/system/v2node.service.d/90-v2node-ramfix.conf`.
 
-VPS mới có thể truyền file config root-only:
+`/etc/v2node/config.json`, `/usr/bin/v2node`, file `v2node.service` chính và toàn bộ
+geodata được giữ nguyên từng byte lẫn metadata. Trước khi thay binary, installer lưu
+binary/drop-in cũ tại `/var/backups/v2node-ramfix`, ghi checksum của mọi file phải giữ
+nguyên, tự kiểm tra backup rồi mới dừng service. Nếu health check không đạt, binary
+gốc được khôi phục tự động.
 
-```bash
-chmod 600 /root/v2node-config.json
-sudo /root/v2node-personal-ram2.sh --config-file /root/v2node-config.json
-```
+Nếu máy từng cài `ram1/ram2` và binary đang là symlink, installer dừng trước mọi
+thay đổi. Hãy cài lại upstream `v0.4.4` rồi mới chạy overlay này; ram3 không tự
+rollback layout cũ để tránh ghi đè config đã được chỉnh sau đó.
 
 Installer tự nhận `amd64/x86_64` hoặc `arm64/aarch64`, dùng đúng asset của tag
-`v0.4.4-ram2` và SHA-256 được nhúng sẵn; không truy vấn release `latest`.
+`v0.4.4-ram3` và SHA-256 được nhúng sẵn; không truy vấn release `latest`.
 
 Checksum chính thức nằm trong `release/SHA256SUMS` và asset `SHA256SUMS` của
 GitHub Release. Installer đã pin cùng các giá trị đó theo từng kiến trúc.
 
-Không đặt API key trên command line. Dùng config mode `0600`, `--api-key-file`
-hoặc `--api-key-stdin`. Nếu repository để private, raw URL và release asset cần
-cơ chế xác thực riêng; không nhúng GitHub token dài hạn vào script fleet.
-
 ## Quản lý và rollback
 
 ```bash
-v2nodectl status
-v2nodectl log
-v2nodectl restart
-v2nodectl version
-v2nodectl rollback
 v2node
+v2node status
+v2node log
+v2node restart
+v2node version
 ```
 
-Installer kiểm tra SHA-256, cấu trúc ZIP, kiến trúc ELF, health gate và thực hiện
-rollback giao dịch nếu cài đặt lỗi. Backup được kiểm tra checksum trước khi restore;
-`v2nodectl rollback` cũng khôi phục menu, binary, geodata của bản gốc và snapshot
-`/etc/fstab` nguyên bản nếu giao dịch đã tạo swap. Theo RAM/cgroup hiệu dụng, systemd
-được cấu hình `GOMEMLIMIT` khoảng 45%, `MemoryHigh` 65%, trần cứng `MemoryMax` 80%
-và `MemorySwapMax` 10% (tối thiểu 128 MiB, tối đa 512 MiB), cùng log rate limit và
-emergency swap.
+Đây chính là menu/lệnh của bản gốc; overlay không cài thêm CLI nào. Rollback kỹ thuật
+của overlay dùng installer đã xác minh:
+
+```bash
+sudo /usr/local/lib/v2node-ramfix/install.sh --rollback
+```
+
+Installer kiểm tra SHA-256, cấu trúc ZIP, kiến trúc ELF và health gate. Theo RAM/cgroup
+hiệu dụng, systemd được bổ sung `GOMEMLIMIT` khoảng 45%, `MemoryHigh` 65%, trần cứng
+`MemoryMax` 80% và `MemorySwapMax` 10% (tối thiểu 128 MiB, tối đa 512 MiB). Overlay
+không tạo swap, không sửa sysctl và không thay chính sách service gốc.
 RAM thực tế vẫn tăng hợp lý theo số connection đang hoạt động;
 nếu chạm trần cứng, systemd khởi động lại service thay vì để cả VPS cạn RAM.
+
+`ram3` được pin đúng baseline upstream `v0.4.4` và sẽ từ chối ghi đè một upstream
+mới hơn. Nếu dùng `v2node update` lên phiên bản khác, chỉ áp lại overlay khi đã có
+RAM-fix được build và kiểm thử cho đúng baseline đó.
 
 ## Runtime guardrails
 
@@ -105,7 +109,7 @@ Nếu ưu tiên throughput hơn RAM, có thể đặt `Runtime.BufferSizeKB` v�
 
 ## Build và kiểm thử
 
-Yêu cầu Go `1.26.1`, `GOEXPERIMENT=jsonv2`, Bash và `zip`:
+Yêu cầu Go `1.26.1`, `GOEXPERIMENT=jsonv2` và Bash:
 
 ```bash
 bash build/build.sh

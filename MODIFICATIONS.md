@@ -1,4 +1,4 @@
-# RAM-only patch set v0.4.4-ram2
+# RAM-only patch set v0.4.4-ram3
 
 Baseline: upstream `wyx2685/v2node` tag `v0.4.4`, commit
 `2daa9dd4a114aa39294350475defa2b748d595ed`.
@@ -77,7 +77,7 @@ User không có device limit vẫn được kết nối khi IP tracker đầy; c
 hạn chỉ không được giữ lại để report. User có device limit bị từ chối khi không thể
 theo dõi thêm IP một cách an toàn.
 
-Installer tính các ngưỡng từ RAM/cgroup hiệu dụng: `GOMEMLIMIT` khoảng 45%,
+Drop-in systemd tính các ngưỡng từ RAM/cgroup hiệu dụng: `GOMEMLIMIT` khoảng 45%,
 `MemoryHigh` 65%, `MemoryMax` 80%, và `MemorySwapMax` 10% nhưng được clamp trong
 khoảng 128–512 MiB. Installer xác minh systemd đã áp dụng đúng các giá trị này.
 Trần cứng khiến systemd restart riêng service thay vì để v2node làm cạn RAM/swap
@@ -85,21 +85,17 @@ của cả VPS.
 
 ## Cài đè và rollback
 
-- Installer dừng service v2node đang chạy và chờ nó inactive trước khi thay service,
-  symlink hoặc file live, tránh để process cũ tiếp tục dùng layout đang được đổi.
-- Backup format 2 có manifest SHA-256 cho mọi payload thường và manifest target cho
-  symlink; parser chấp nhận đúng marker text/binary chuẩn của `sha256sum`, marker
-  config vắng mặt dùng cùng tên với restore, đồng thời yêu cầu coverage không thiếu/
-  trùng/traversal cho mọi payload bất biến. Backup tự xác minh trước khi dừng service,
-  rollback guard được kích hoạt trước live mutation, và restore kiểm tra lại toàn bộ
-  backup trước khi dùng.
-- Nếu giao dịch đã thêm `/swapfile` vào `/etc/fstab`, rollback tắt swap vừa tạo và
-  khôi phục nguyên bản snapshot `fstab` bằng phép thay thế nguyên tử, thay vì sửa dòng
-  theo mẫu có thể làm đổi nội dung khác của máy.
-- Menu quản lý và thao tác tự phục hồi menu dùng `v2node-menu` có sẵn trong release
-  đã xác minh, hoạt động offline và không chạy shell từ nhánh `main` mutable. Cập nhật
-  package đi qua installer đã lưu cục bộ với tag/hash được pin. Trình tạo config của
-  menu ghi nguyên tử với mode `0600`, ẩn API key và từ chối host mẫu `example.com`.
+- Installer yêu cầu layout bản gốc, dừng `v2node.service` và chờ inactive trước khi
+  thay duy nhất `/usr/local/v2node/v2node` bằng phép đổi tên nguyên tử.
+- File config, menu `/usr/bin/v2node`, geodata và fragment service chính được snapshot
+  hash + metadata rồi xác nhận không đổi sau health check. Overlay không ghi các file
+  này, không tạo `current/releases`, không tạo swap và không sửa sysctl.
+- Drop-in `90-v2node-ramfix.conf` chỉ bổ sung `GOMEMLIMIT`, `MemoryHigh`, `MemoryMax`
+  và `MemorySwapMax`; mọi lệnh và chính sách quản lý service gốc vẫn giữ nguyên.
+- Backup format 3 có SHA-256 coverage đầy đủ cho binary/drop-in/installer và mọi bản
+  ghi invariant. Backup tự xác minh trước khi dừng service, rollback guard được kích
+  hoạt trước live mutation, và restore kiểm tra lại checksum trước khi dùng.
+- Lệnh quản lý vẫn là `v2node` nguyên bản; không cài thêm controller/CLI hay menu thay thế.
 
 ## Kiểm thử bắt buộc
 

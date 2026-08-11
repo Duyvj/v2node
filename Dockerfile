@@ -8,7 +8,7 @@ ENV CGO_ENABLED=0 GOEXPERIMENT=jsonv2 GOTOOLCHAIN=local
 RUN go mod download && go mod verify
 
 COPY . .
-ARG VERSION=v0.4.4-ram2
+ARG VERSION=v0.4.4-ram3
 RUN go build -trimpath -buildvcs=false \
     -ldflags "-s -w -buildid= -X github.com/wyx2685/v2node/cmd.version=${VERSION}" \
     -o /out/v2node ./

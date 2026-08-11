@@ -1,12 +1,13 @@
 {
   "schema": 1,
-  "product": "v2node-personal",
-  "version": "v0.4.4-ram2",
+  "product": "v2node",
+  "version": "v0.4.4-ram3",
   "source_repo": "https://github.com/wyx2685/v2node",
   "source_tag": "v0.4.4",
   "source_commit": "2daa9dd4a114aa39294350475defa2b748d595ed",
   "go_version": "go1.26.1",
   "goexperiment": "jsonv2",
+  "geodata_packaged": false,
   "build": {
     "cgo_enabled": false,
     "flags": "-trimpath -buildvcs=false -s -w -buildid=",
@@ -31,18 +32,18 @@
     }
   ],
   "source_bundle": {
-    "name": "v2node-personal-v0.4.4-ram2-source.zip"
+    "name": "v2node-v0.4.4-ram3-source.zip"
   },
   "artifacts": [
     {
-      "name": "v2node-personal-v0.4.4-ram2-linux-64.zip",
-      "size": 31738116,
-      "sha256": "d7090defddb5261842674dff04f408cec5d99351a667c95013cf6c68d8e41c34"
+      "name": "v2node-linux-64.zip",
+      "size": 24816052,
+      "sha256": "47cad5ad7737a2872d4b5e54f885e79cc8f750a454f259bb8a9235c6d3c79c58"
     },
     {
-      "name": "v2node-personal-v0.4.4-ram2-linux-arm64-v8a.zip",
-      "size": 29360233,
-      "sha256": "34aeeada5dabbd9f2369cd0ab81995d966d1a2e8c2c63e84d4f95bd8544b90ab"
+      "name": "v2node-linux-arm64-v8a.zip",
+      "size": 22577603,
+      "sha256": "3d8894cf5a2306522168959f6448a4f3d83735d386363742b256b36d2332370c"
     }
   ]
 }
