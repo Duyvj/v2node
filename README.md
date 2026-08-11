@@ -1,4 +1,4 @@
-# v2node v0.4.4-ram4 — RAM fix overlay
+# v2node v0.4.4-ram5 — RAM fix overlay
 
 Bản mod RAM-only từ [wyx2685/v2node](https://github.com/wyx2685/v2node)
 `v0.4.4`, dành cho nhiều VPS nhỏ và máy chạy lâu ngày. Protocol, routing,
@@ -35,7 +35,7 @@ Nếu VPS đã cài bản gốc bằng `wyx2685/v2node` và có
 
 ```bash
 wget -O /root/v2node-ramfix.sh \
-  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram4/script/install.sh
+  https://raw.githubusercontent.com/Duyvj/v2node/v0.4.4-ram5/script/install.sh
 chmod 700 /root/v2node-ramfix.sh
 sudo /root/v2node-ramfix.sh
 ```
@@ -52,12 +52,12 @@ nguyên, tự kiểm tra backup rồi mới dừng service. Nếu health check k
 gốc được khôi phục tự động.
 
 Nếu máy từng cài `ram1/ram2` và binary đang là symlink, installer dừng trước mọi
-thay đổi. Hãy cài lại upstream `v0.4.4` rồi mới chạy overlay này; ram4 không tự
+thay đổi. Hãy cài lại upstream `v0.4.4` rồi mới chạy overlay này; ram5 không tự
 rollback layout cũ để tránh ghi đè config đã được chỉnh sau đó. Máy đang chạy
-`ram3` có thể cài đè trực tiếp lên `ram4`.
+`ram3/ram4` có thể cài đè trực tiếp lên `ram5`.
 
 Installer tự nhận `amd64/x86_64` hoặc `arm64/aarch64`, dùng đúng asset của tag
-`v0.4.4-ram4` và SHA-256 được nhúng sẵn; không truy vấn release `latest`.
+`v0.4.4-ram5` và SHA-256 được nhúng sẵn; không truy vấn release `latest`.
 
 Checksum chính thức nằm trong `release/SHA256SUMS` và asset `SHA256SUMS` của
 GitHub Release. Installer đã pin cùng các giá trị đó theo từng kiến trúc.
@@ -80,11 +80,11 @@ sudo /usr/local/lib/v2node-ramfix/install.sh --rollback
 ```
 
 Installer kiểm tra SHA-256, cấu trúc ZIP, kiến trúc ELF và health gate. Profile
-`ram4` ưu tiên tải đồng thời cao: chừa cho hệ điều hành `max(384 MiB, 15% RAM)`
+`ram5` ưu tiên tải đồng thời cao: chừa cho hệ điều hành `max(384 MiB, 15% RAM)`
 nhưng không quá 25% RAM trên VPS nhỏ; `MemoryMax` dùng phần còn lại. `GOMEMLIMIT`
-chừa tối thiểu 256 MiB hoặc 10% trần service, còn `MemoryHigh` chỉ bắt đầu gần trần
-với headroom tối thiểu 128 MiB hoặc 5%. `MemorySwapMax` vẫn là 10% RAM, clamp
-128–512 MiB.
+chừa `max(256 MiB, 10% trần service)`, được cap ở một phần ba trần trên máy nhỏ.
+`MemoryHigh` chừa `max(128 MiB, 5%)`, được cap ở một phần tư trần trên máy nhỏ.
+`MemorySwapMax` vẫn là 10% RAM, clamp 128–512 MiB.
 
 Giá trị danh nghĩa theo RAM/cgroup hiệu dụng:
 
@@ -99,7 +99,7 @@ restart thay vì làm cả VPS cạn RAM. Overlay không tạo swap hoặc sửa
 Nếu config đã đặt `Runtime.MemoryLimit`, giá trị đó sẽ chủ động thay `GOMEMLIMIT`
 của drop-in. Sau khi nâng/hạ RAM VPS, hãy chạy lại installer để tính lại profile.
 
-`ram4` được pin đúng baseline upstream `v0.4.4` và sẽ từ chối ghi đè một upstream
+`ram5` được pin đúng baseline upstream `v0.4.4` và sẽ từ chối ghi đè một upstream
 mới hơn. Nếu dùng `v2node update` lên phiên bản khác, chỉ áp lại overlay khi đã có
 RAM-fix được build và kiểm thử cho đúng baseline đó.
 

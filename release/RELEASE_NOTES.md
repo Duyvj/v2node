@@ -1,4 +1,4 @@
-# v0.4.4-ram4
+# v0.4.4-ram5
 
 RAM-fix overlay dựa trực tiếp trên `wyx2685/v2node` `v0.4.4`
 (`2daa9dd4a114aa39294350475defa2b748d595ed`). Protocol, routing, sniffing,
@@ -10,14 +10,16 @@ panel API, quản lý user và định dạng report traffic giữ nguyên basel
 `GOMEMLIMIT=45%` có thể làm Go GC chạy dày sớm và `MemoryHigh=65%` có thể kích
 hoạt reclaim/throttling trước khi máy thực sự thiếu RAM.
 
-`ram4` chuyển sang profile capacity thích ứng:
+`ram5` giữ profile capacity thích ứng đã có ở `ram4`, đồng thời sửa cách đọc
+cgroup v2, từ chối parent cgroup hạ trần thực tế và bổ sung regression test:
 
 - chừa cho hệ điều hành `max(384 MiB, 15% RAM/cgroup hiệu dụng)`, nhưng không quá
   25% tổng RAM trên VPS nhỏ;
 - `MemoryMax` là phần RAM còn lại sau host reserve;
-- `GOMEMLIMIT` thấp hơn trần service tối thiểu 256 MiB hoặc 10%;
-- `MemoryHigh` thấp hơn trần service tối thiểu 128 MiB hoặc 5%, nên chỉ là ngưỡng
-  áp lực gần khẩn cấp thay vì can thiệp sớm;
+- `GOMEMLIMIT` thấp hơn trần service `max(256 MiB, 10%)`, với headroom được cap
+  ở một phần ba trần trên VPS nhỏ;
+- `MemoryHigh` thấp hơn trần service `max(128 MiB, 5%)`, với headroom được cap
+  ở một phần tư trần trên VPS nhỏ, nên chỉ là ngưỡng áp lực gần khẩn cấp;
 - `MemorySwapMax` giữ 10%, clamp 128–512 MiB và không tự tạo swap.
 
 | RAM hiệu dụng | Host reserve | GOMEMLIMIT | MemoryHigh | MemoryMax |
@@ -41,7 +43,7 @@ Nếu config đang đặt `Runtime.MemoryLimit`, giá trị đó vẫn được 
 - Quản lý tiếp tục dùng lệnh `v2node` của bản gốc.
 - Toàn bộ giới hạn state, cleanup goroutine/timer/socket/transport và các sửa race
   của ram3 vẫn được giữ nguyên.
-- Máy đang chạy ram3 có thể cài đè trực tiếp; layout ram1/ram2 vẫn phải được đưa về
+- Máy đang chạy ram3/ram4 có thể cài đè trực tiếp; layout ram1/ram2 vẫn phải được đưa về
   upstream `v0.4.4` trước.
 
 Rollback overlay:

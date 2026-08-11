@@ -7,10 +7,10 @@ IFS=$'\n\t'
 umask 077
 
 readonly PRODUCT="v2node"
-readonly DEFAULT_VERSION="v0.4.4-ram4"
+readonly DEFAULT_VERSION="v0.4.4-ram5"
 readonly RELEASE_REPOSITORY="https://github.com/Duyvj/v2node"
-readonly DEFAULT_SHA256_64="783183398c053c41571881ca3c22bbbdd40ad59628312cb9d16056bdc9a8af9a"
-readonly DEFAULT_SHA256_ARM64="2b9705727595ce2f08790a3b1411dcce55840005b75340a92a41afb26cf7a8d7"
+readonly DEFAULT_SHA256_64="db1d0e83fbfff5b7b243fa0e9f469230964b083cf3339a68d6a48ec58f93e038"
+readonly DEFAULT_SHA256_ARM64="ad88e6d888318e4875a1e28b37fa360ba5605ef7cc4f44ba866e1b4c8f54c2fd"
 readonly ORIGINAL_ROOT="/usr/local/v2node"
 readonly ORIGINAL_BINARY="${ORIGINAL_ROOT}/v2node"
 readonly CONFIG_FILE="/etc/v2node/config.json"
@@ -70,7 +70,7 @@ Options:
   --package FILE             Use a local release ZIP (requires --sha256)
   --package-url HTTPS_URL    Use a custom HTTPS ZIP (requires --sha256)
   --sha256 HASH              Exact SHA-256 for a custom package
-  --version VERSION          Release label (default: v0.4.4-ram4)
+  --version VERSION          Release label (default: v0.4.4-ram5)
   --keep-backups N           Retain N committed backups (default: 3)
   --rollback                 Restore the state before the latest overlay
   -h, --help                 Show this help
@@ -127,16 +127,17 @@ select_default_package() {
 }
 
 effective_memory_mib() {
-  local value mem_total=0 cgroup_limit=0 cgroup_limited=0
+  local value mem_total=0 cgroup_limit=0 cgroup_limited=0 cgroup_v2_present=0
   mem_total="$(awk '/^MemTotal:/ { print int($2 / 1024) }' "$MEMINFO_FILE")"
   if [[ -r "$CGROUP_V2_MEMORY_MAX_FILE" ]]; then
+    cgroup_v2_present=1
     value="$(cat "$CGROUP_V2_MEMORY_MAX_FILE")"
-    if [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 )); then
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
       cgroup_limit=$((value / 1024 / 1024))
       cgroup_limited=1
     fi
   fi
-  if (( cgroup_limited == 0 )) && [[ -r "$CGROUP_V1_MEMORY_LIMIT_FILE" ]]; then
+  if (( cgroup_v2_present == 0 && cgroup_limited == 0 )) && [[ -r "$CGROUP_V1_MEMORY_LIMIT_FILE" ]]; then
     value="$(cat "$CGROUP_V1_MEMORY_LIMIT_FILE")"
     if [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 && value < 9223372036854771712 )); then
       cgroup_limit=$((value / 1024 / 1024))
@@ -211,6 +212,9 @@ validate_original_install() {
     die "install upstream v2node first; expected a regular executable at $ORIGINAL_BINARY"
   [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] ||
     die "existing upstream config is missing or unsafe: $CONFIG_FILE"
+  if grep -Eq '"MemoryLimit"[[:space:]]*:' "$CONFIG_FILE"; then
+    warn 'config contains Runtime.MemoryLimit; a non-empty value overrides the automatic GOMEMLIMIT profile'
+  fi
   [[ -f "$MENU_FILE" && ! -L "$MENU_FILE" && -x "$MENU_FILE" ]] ||
     die "existing upstream management command is missing or unsafe: $MENU_FILE"
   fragment="$(systemctl show "$SERVICE_NAME" -p FragmentPath --value 2>/dev/null || true)"
@@ -222,7 +226,7 @@ validate_original_install() {
   version_output="$("$ORIGINAL_BINARY" version 2>/dev/null || true)"
   installed_version="$(awk 'NR == 1 { print $2 }' <<<"$version_output")"
   case "$installed_version" in
-    v0.4.4|v0.4.4-ram3|v0.4.4-ram4) ;;
+    v0.4.4|v0.4.4-ram3|v0.4.4-ram4|v0.4.4-ram5) ;;
     "") die 'could not determine the installed upstream v2node version' ;;
     *) die "this RAM fix is pinned to upstream v0.4.4, but the installed binary reports $installed_version" ;;
   esac
@@ -511,10 +515,10 @@ verify_service_profile() {
   effective_high="$(systemctl show "$SERVICE_NAME" -p EffectiveMemoryHigh --value 2>/dev/null || true)"
   effective_max="$(systemctl show "$SERVICE_NAME" -p EffectiveMemoryMax --value 2>/dev/null || true)"
   if [[ "$effective_high" =~ ^[0-9]+$ ]] && (( effective_high < MEMORY_HIGH_MIB * 1024 * 1024 )); then
-    warn "a parent cgroup lowers EffectiveMemoryHigh to $effective_high bytes"
+    die "a parent cgroup lowers EffectiveMemoryHigh to $effective_high bytes"
   fi
   if [[ "$effective_max" =~ ^[0-9]+$ ]] && (( effective_max < MEMORY_MAX_MIB * 1024 * 1024 )); then
-    warn "a parent cgroup lowers EffectiveMemoryMax to $effective_max bytes"
+    die "a parent cgroup lowers EffectiveMemoryMax to $effective_max bytes"
   fi
 }
 
@@ -719,6 +723,7 @@ main() {
     return
   fi
   require_cmd awk
+  require_cmd grep
   require_cmd unzip
   require_cmd install
   require_cmd od

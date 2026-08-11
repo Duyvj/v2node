@@ -22,6 +22,17 @@ CGROUP_V1_MEMORY_LIMIT_FILE="$tmp/memory.limit_in_bytes"
 printf 'MemTotal:       4194304 kB\n' > "$MEMINFO_FILE"
 printf 'max\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
 [[ "$(effective_memory_mib)" == 4096 ]] || fail 'unlimited cgroup-v2 did not use host RAM'
+printf '0\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
+[[ "$(effective_memory_mib)" == 0 ]] || fail 'zero cgroup-v2 limit fell back to host RAM'
+if (resource_profile >/dev/null 2>&1); then
+  fail 'zero cgroup-v2 limit was accepted'
+fi
+printf 'max\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
+printf '1073741824\n' > "$CGROUP_V1_MEMORY_LIMIT_FILE"
+[[ "$(effective_memory_mib)" == 4096 ]] || fail 'cgroup-v1 shadowed authoritative cgroup-v2 max'
+rm -f "$CGROUP_V1_MEMORY_LIMIT_FILE"
+printf '8589934592\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
+[[ "$(effective_memory_mib)" == 4096 ]] || fail 'cgroup limit larger than host RAM was selected'
 printf '2147483648\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
 [[ "$(effective_memory_mib)" == 2048 ]] || fail 'cgroup-v2 limit did not override host RAM'
 printf '268435456\n' > "$CGROUP_V2_MEMORY_MAX_FILE"
@@ -101,6 +112,8 @@ test_mem=2048
 effective_memory_mib() { printf '%s\n' "$test_mem"; }
 resource_profile >/dev/null
 MOCK_ENVIRONMENT="NOT_GOMEMLIMIT=${GOMEMLIMIT}"
+MOCK_EFFECTIVE_HIGH="$((MEMORY_HIGH_MIB * 1024 * 1024))"
+MOCK_EFFECTIVE_MAX="$((MEMORY_MAX_MIB * 1024 * 1024))"
 systemctl() {
   local prop='' arg next=0
   for arg in "$@"; do
@@ -112,8 +125,8 @@ systemctl() {
     MemoryMax) printf '%s\n' "$((MEMORY_MAX_MIB * 1024 * 1024))" ;;
     MemorySwapMax) printf '%s\n' "$((MEMORY_SWAP_MAX_MIB * 1024 * 1024))" ;;
     Environment) printf '%s\n' "$MOCK_ENVIRONMENT" ;;
-    EffectiveMemoryHigh) printf '%s\n' "$((MEMORY_HIGH_MIB * 1024 * 1024 - 1))" ;;
-    EffectiveMemoryMax) printf '%s\n' "$((MEMORY_MAX_MIB * 1024 * 1024 - 1))" ;;
+    EffectiveMemoryHigh) printf '%s\n' "$MOCK_EFFECTIVE_HIGH" ;;
+    EffectiveMemoryMax) printf '%s\n' "$MOCK_EFFECTIVE_MAX" ;;
     *) return 1 ;;
   esac
 }
@@ -121,6 +134,16 @@ if (verify_service_profile >/dev/null 2>&1); then
   fail 'profile verifier accepted NOT_GOMEMLIMIT as GOMEMLIMIT'
 fi
 MOCK_ENVIRONMENT="FOO=1 GOMEMLIMIT=${GOMEMLIMIT} BAR=2"
+MOCK_EFFECTIVE_HIGH="$((MEMORY_HIGH_MIB * 1024 * 1024 - 1))"
+if (verify_service_profile >/dev/null 2>&1); then
+  fail 'profile verifier accepted a lower parent EffectiveMemoryHigh'
+fi
+MOCK_EFFECTIVE_HIGH="$((MEMORY_HIGH_MIB * 1024 * 1024))"
+MOCK_EFFECTIVE_MAX="$((MEMORY_MAX_MIB * 1024 * 1024 - 1))"
+if (verify_service_profile >/dev/null 2>&1); then
+  fail 'profile verifier accepted a lower parent EffectiveMemoryMax'
+fi
+MOCK_EFFECTIVE_MAX="$((MEMORY_MAX_MIB * 1024 * 1024))"
 verify_service_profile >/dev/null 2>&1 || fail 'profile verifier rejected the exact GOMEMLIMIT assignment'
 unset -f systemctl
 
@@ -226,7 +249,8 @@ grep -Fq 'snapshot_path "$fragment" service' "$ROOT/deploy/install.sh" || fail '
 grep -Fq 'MemoryHigh=${MEMORY_HIGH}' "$ROOT/deploy/install.sh" || fail 'MemoryHigh is missing'
 grep -Fq 'MemoryMax=${MEMORY_MAX}' "$ROOT/deploy/install.sh" || fail 'MemoryMax is missing'
 grep -Fq 'MemorySwapMax=${MEMORY_SWAP_MAX}' "$ROOT/deploy/install.sh" || fail 'MemorySwapMax is missing'
-grep -Fq 'v0.4.4|v0.4.4-ram3|v0.4.4-ram4)' "$ROOT/deploy/install.sh" || fail 'upstream-version gate is missing'
+grep -Fq 'config contains Runtime.MemoryLimit' "$ROOT/deploy/install.sh" || fail 'Runtime.MemoryLimit override warning is missing'
+grep -Fq 'v0.4.4|v0.4.4-ram3|v0.4.4-ram4|v0.4.4-ram5)' "$ROOT/deploy/install.sh" || fail 'upstream-version gate is missing'
 grep -Fq 'set -o noclobber' "$ROOT/deploy/install.sh" || fail 'lock creation is not symlink-safe'
 grep -Fq 'exec 9<>"$LOCK_FILE"' "$ROOT/deploy/install.sh" || fail 'lock file is opened with a truncating mode'
 if grep -Eq 'CURRENT_LINK|RELEASES_DIR|v2node-menu|v2nodectl|/swapfile|SYSCTL_FILE|write_service\(' "$ROOT/deploy/install.sh"; then

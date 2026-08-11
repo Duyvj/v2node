@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "product": "v2node",
-  "version": "v0.4.4-ram4",
+  "version": "v0.4.4-ram5",
   "source_repo": "https://github.com/wyx2685/v2node",
   "source_tag": "v0.4.4",
   "source_commit": "2daa9dd4a114aa39294350475defa2b748d595ed",
@@ -32,18 +32,18 @@
     }
   ],
   "source_bundle": {
-    "name": "v2node-v0.4.4-ram4-source.zip"
+    "name": "v2node-v0.4.4-ram5-source.zip"
   },
   "artifacts": [
     {
       "name": "v2node-linux-64.zip",
       "size": 24816053,
-      "sha256": "783183398c053c41571881ca3c22bbbdd40ad59628312cb9d16056bdc9a8af9a"
+      "sha256": "db1d0e83fbfff5b7b243fa0e9f469230964b083cf3339a68d6a48ec58f93e038"
     },
     {
       "name": "v2node-linux-arm64-v8a.zip",
       "size": 22577604,
-      "sha256": "2b9705727595ce2f08790a3b1411dcce55840005b75340a92a41afb26cf7a8d7"
+      "sha256": "ad88e6d888318e4875a1e28b37fa360ba5605ef7cc4f44ba866e1b4c8f54c2fd"
     }
   ]
 }

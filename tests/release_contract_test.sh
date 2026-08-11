@@ -4,7 +4,7 @@ IFS=$'\n\t'
 
 readonly ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 readonly ARTIFACTS="${1:-$ROOT/artifacts}"
-readonly VERSION="v0.4.4-ram4"
+readonly VERSION="v0.4.4-ram5"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -57,12 +57,12 @@ done
 (cd "$ARTIFACTS" && sha256sum --check --status SHA256SUMS) || fail 'artifact SHA256SUMS verification failed'
 cmp -s "$ARTIFACTS/SHA256SUMS" "$ROOT/SHA256SUMS" || fail 'root checksum file differs'
 cmp -s "$ARTIFACTS/SHA256SUMS" "$ROOT/release/SHA256SUMS" || fail 'release checksum file differs'
-grep -Fq '"version": "v0.4.4-ram4"' "$ROOT/release/manifest.json" || fail 'manifest version mismatch'
+grep -Fq '"version": "v0.4.4-ram5"' "$ROOT/release/manifest.json" || fail 'manifest version mismatch'
 grep -Fq "$sha64" "$ROOT/release/manifest.json" || fail 'manifest lacks amd64 hash'
 grep -Fq "$sha_arm64" "$ROOT/release/manifest.json" || fail 'manifest lacks arm64 hash'
 grep -Fq "\"size\": $size64" "$ROOT/release/manifest.json" || fail 'manifest lacks amd64 size'
 grep -Fq "\"size\": $size_arm64" "$ROOT/release/manifest.json" || fail 'manifest lacks arm64 size'
-grep -Fq '"name": "v2node-v0.4.4-ram4-source.zip"' "$ROOT/release/manifest.json" || fail 'manifest source bundle mismatch'
+grep -Fq '"name": "v2node-v0.4.4-ram5-source.zip"' "$ROOT/release/manifest.json" || fail 'manifest source bundle mismatch'
 grep -Fxq "version=$VERSION" "$ROOT/BUILDINFO" || fail 'BUILDINFO version mismatch'
 grep -Fq "readonly VERSION=\"$VERSION\"" "$ROOT/build/build.sh" || fail 'build script version mismatch'
 grep -Fq "ARG VERSION=$VERSION" "$ROOT/Dockerfile" || fail 'Docker version mismatch'
