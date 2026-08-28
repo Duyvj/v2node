@@ -449,7 +449,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 }
 
 func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, network net.Network) (SniffResult, error) {
-	payload := buf.NewWithSize(32767)
+	payload := buf.New()
 	defer payload.Release()
 
 	sniffer := NewSniffer(ctx)

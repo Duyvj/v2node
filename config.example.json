@@ -1,0 +1,23 @@
+{
+  "Log": {
+    "Level": "info",
+    "Output": "",
+    "Access": "none"
+  },
+  "Resource": {
+    "Profile": "low",
+    "MemLimitMB": 256,
+    "GOGC": 50,
+    "BufferSize": 16,
+    "ConnectionIdle": 45,
+    "PeriodicMemoryReleaseInterval": 60
+  },
+  "Nodes": [
+    {
+      "ApiHost": "https://your-v2board-domain.com",
+      "ApiKey": "your_api_token",
+      "NodeID": 1,
+      "Timeout": 15
+    }
+  ]
+}

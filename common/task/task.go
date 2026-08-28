@@ -28,26 +28,28 @@ func (t *Task) Start(first bool) error {
 	t.Running = true
 	t.Stop = make(chan struct{})
 	t.Access.Unlock()
+
 	go func() {
-		timer := time.NewTimer(t.Interval)
-		defer timer.Stop()
 		if first {
 			if err := t.ExecuteWithTimeout(); err != nil {
-				return
+				log.Errorf("Task %s initial execution error: %v", t.Name, err)
 			}
 		}
 
-		for {
-			timer.Reset(t.Interval)
-			select {
-			case <-timer.C:
-				// continue
-			case <-t.Stop:
-				return
-			}
+		interval := t.Interval
+		if interval <= 0 {
+			interval = 30 * time.Second
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
 
-			if err := t.ExecuteWithTimeout(); err != nil {
-				log.Errorf("Task %s execution error: %v", t.Name, err)
+		for {
+			select {
+			case <-ticker.C:
+				if err := t.ExecuteWithTimeout(); err != nil {
+					log.Errorf("Task %s execution error: %v", t.Name, err)
+				}
+			case <-t.Stop:
 				return
 			}
 		}
@@ -57,32 +59,33 @@ func (t *Task) Start(first bool) error {
 }
 
 func (t *Task) ExecuteWithTimeout() error {
-	ctx, cancel := context.WithTimeout(context.Background(), min(5*t.Interval, 5*time.Minute))
+	timeout := min(5*t.Interval, 5*time.Minute)
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	done := make(chan error, 1)
 
-	go func() {
-		done <- t.Execute(ctx)
-	}()
-
-	select {
-	case <-ctx.Done():
-		log.Errorf("Task %s execution timed out, reloading", t.Name)
-		if t.ReloadCh != nil {
-			select {
-			case t.ReloadCh <- struct{}{}:
-			default:
+	err := t.Execute(ctx)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Errorf("Task %s execution timed out, reloading", t.Name)
+			if t.ReloadCh != nil {
+				select {
+				case t.ReloadCh <- struct{}{}:
+				default:
+				}
+			} else {
+				log.Panic("Reload failed")
 			}
-		} else {
-			log.Panic("Reload failed")
+			return nil
 		}
-		return nil
-	case err := <-done:
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) {
 			return nil
 		}
 		return err
 	}
+	return nil
 }
 
 func (t *Task) safeStop() {

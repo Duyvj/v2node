@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
 	"syscall"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -37,6 +39,38 @@ func init() {
 		BoolVarP(&watch, "watch", "w",
 			true, "watch file path change")
 	command.AddCommand(&serverCommand)
+}
+
+func applyResourceSettings(r *conf.ResourceConfig) {
+	if r.GOGC > 0 {
+		oldGC := debug.SetGCPercent(r.GOGC)
+		log.Infof("[Resource] GC percent set to %d%% (previous: %d%%)", r.GOGC, oldGC)
+	}
+	if r.MemLimitMB > 0 {
+		limitBytes := int64(r.MemLimitMB) * 1024 * 1024
+		oldLimit := debug.SetMemoryLimit(limitBytes)
+		log.Infof("[Resource] Soft memory limit set to %d MB (previous: %d MB)", r.MemLimitMB, oldLimit/(1024*1024))
+	}
+	log.Infof("[Resource] Profile: %s, Pipe BufferSize: %d KB, ConnectionIdle: %ds", r.Profile, r.BufferSize, r.ConnectionIdle)
+}
+
+func startPeriodicMemoryRelease(intervalSeconds int, stopCh <-chan struct{}) {
+	if intervalSeconds <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(time.Duration(intervalSeconds) * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				runtime.GC()
+				debug.FreeOSMemory()
+			case <-stopCh:
+				return
+			}
+		}
+	}()
 }
 
 func serverHandle(_ *cobra.Command, _ []string) {
@@ -69,6 +103,13 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		}
 		log.SetOutput(f)
 	}
+
+	// Apply runtime resource settings
+	applyResourceSettings(&c.ResourceConfig)
+	stopMemCleaner := make(chan struct{})
+	defer close(stopMemCleaner)
+	startPeriodicMemoryRelease(c.ResourceConfig.PeriodicMemoryReleaseInterval, stopMemCleaner)
+
 	// Enable pprof if configured
 	if c.PprofPort != 0 {
 		go func() {
@@ -119,6 +160,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	}
 	// clear memory
 	runtime.GC()
+	debug.FreeOSMemory()
 
 	osSignals := make(chan os.Signal, 1)
 	signal.Notify(osSignals, syscall.SIGINT, syscall.SIGTERM)
@@ -181,6 +223,8 @@ func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
 		}
 	}
 
+	applyResourceSettings(&newConf.ResourceConfig)
+
 	newNodes, err := node.New(newConf.NodeConfigs)
 	if err != nil {
 		return err
@@ -201,5 +245,6 @@ func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
 	*v2core = newCore
 
 	runtime.GC()
+	debug.FreeOSMemory()
 	return nil
 }

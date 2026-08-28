@@ -142,7 +142,9 @@ func (l *Limiter) UpdateDynamicSpeedLimit(tag, uuid string, limit int, expire ti
 
 func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (DynamicBucket *rate.DynamicBucket, Reject bool) {
 	// check if ipv4 mapped ipv6
-	ip = strings.TrimPrefix(ip, "::ffff:")
+	if strings.HasPrefix(ip, "::ffff:") {
+		ip = ip[7:]
+	}
 
 	// check and gen speed limit Bucket
 	nodeLimit := l.SpeedLimit
@@ -168,36 +170,37 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 		return nil, true
 	}
 	if noUDPsource || l.Nodetype == "hysteria2" || l.Nodetype == "tuic" {
-		// Store online user for device limit
-		newipMap := new(sync.Map)
-		newipMap.Store(ip, uid)
 		aliveIp := l.AliveList[uid]
-		// If any device is online
-		if v, loaded := l.UserOnlineIP.LoadOrStore(taguuid, newipMap); loaded {
-			oldipMap := v.(*sync.Map)
-			// If this is a new ip
-			if _, loaded := oldipMap.LoadOrStore(ip, uid); !loaded {
-				if v, loaded := l.OldUserOnline.Load(ip); loaded {
-					if v.(int) == uid {
-						l.OldUserOnline.Delete(ip)
-					}
-				} else if deviceLimit > 0 {
-					if deviceLimit <= aliveIp {
-						oldipMap.Delete(ip)
-						return nil, true
-					}
+		var ipMap *sync.Map
+		if v, ok := l.UserOnlineIP.Load(taguuid); ok {
+			ipMap = v.(*sync.Map)
+		} else {
+			newMap := new(sync.Map)
+			if actual, loaded := l.UserOnlineIP.LoadOrStore(taguuid, newMap); loaded {
+				ipMap = actual.(*sync.Map)
+			} else {
+				ipMap = newMap
+				if deviceLimit > 0 && deviceLimit <= aliveIp {
+					l.UserOnlineIP.Delete(taguuid)
+					return nil, true
+				}
+			}
+		}
+
+		if _, loaded := ipMap.LoadOrStore(ip, uid); !loaded {
+			if v, loaded := l.OldUserOnline.Load(ip); loaded {
+				if v.(int) == uid {
+					l.OldUserOnline.Delete(ip)
+				}
+			} else if deviceLimit > 0 {
+				if deviceLimit <= aliveIp {
+					ipMap.Delete(ip)
+					return nil, true
 				}
 			}
 		} else if v, ok := l.OldUserOnline.Load(ip); ok {
 			if v.(int) == uid {
 				l.OldUserOnline.Delete(ip)
-			}
-		} else {
-			if deviceLimit > 0 {
-				if deviceLimit <= aliveIp {
-					l.UserOnlineIP.Delete(taguuid)
-					return nil, true
-				}
 			}
 		}
 	}
@@ -217,7 +220,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 }
 
 func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
-	var onlineUser []panel.OnlineUser
+	onlineUser := make([]panel.OnlineUser, 0, 64)
 	l.OldUserOnline = new(sync.Map)
 	l.UserOnlineIP.Range(func(key, value interface{}) bool {
 		taguuid := key.(string)

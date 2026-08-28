@@ -38,8 +38,8 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 			"err": err,
 		}).Info("Get online device failed")
 	} else if len(*onlineDevice) > 0 {
-		var result []panel.OnlineUser
-		var nocountUID = make(map[int]struct{})
+		result := make([]panel.OnlineUser, 0, len(*onlineDevice))
+		nocountUID := make(map[int]struct{}, len(userTraffic))
 		for _, traffic := range userTraffic {
 			total := traffic.Upload + traffic.Download
 			if total < int64(devicemin*1000) {
@@ -51,7 +51,7 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				result = append(result, online)
 			}
 		}
-		data := make(map[int][]string)
+		data := make(map[int][]string, len(result))
 		for _, onlineuser := range result {
 			// json structure: { UID1:["ip1","ip2"],UID2:["ip3","ip4"] }
 			data[onlineuser.UID] = append(data[onlineuser.UID], onlineuser.IP)
@@ -91,6 +91,7 @@ func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []pane
 		}
 	}
 
+	deleted = make([]panel.UserInfo, 0, len(oldMap))
 	for _, o := range oldMap {
 		deleted = append(deleted, o)
 	}

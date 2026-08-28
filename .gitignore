@@ -16,3 +16,9 @@ output/*
 .idea/*
 new.sh
 quick_update.sh
+*.exe
+v2node
+v2node_*
+*.log
+bin/
+dist/
