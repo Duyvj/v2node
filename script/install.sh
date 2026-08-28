@@ -274,22 +274,26 @@ install_v2node() {
         fi
         echo -e "${green}检测到最新版本：${last_version}，开始安装...${plain}"
         url="https://github.com/Duyvj/v2node/releases/download/${last_version}/v2node-linux-${arch}.zip"
-        curl -sL "$url" | pv -s 30M -W -N "下载进度" > /usr/local/v2node/v2node-linux.zip
-        if [[ $? -ne 0 ]]; then
+        curl -fsSL "$url" | pv -s 30M -W -N "下载进度" > /usr/local/v2node/v2node-linux.zip
+        if [[ $? -ne 0 || ! -s /usr/local/v2node/v2node-linux.zip ]]; then
             echo -e "${red}下载 v2node 失败，请确保你的服务器能够下载 Github 的文件${plain}"
             exit 1
         fi
     else
     last_version=$version_param
         url="https://github.com/Duyvj/v2node/releases/download/${last_version}/v2node-linux-${arch}.zip"
-        curl -sL "$url" | pv -s 30M -W -N "下载进度" > /usr/local/v2node/v2node-linux.zip
-        if [[ $? -ne 0 ]]; then
+        curl -fsSL "$url" | pv -s 30M -W -N "下载进度" > /usr/local/v2node/v2node-linux.zip
+        if [[ $? -ne 0 || ! -s /usr/local/v2node/v2node-linux.zip ]]; then
             echo -e "${red}下载 v2node $1 失败，请确保此版本存在${plain}"
             exit 1
         fi
     fi
 
-    unzip v2node-linux.zip
+    unzip -o v2node-linux.zip
+    if [[ $? -ne 0 || ! -f /usr/local/v2node/v2node ]]; then
+        echo -e "${red}解压 v2node 失败，下载的文件可能已损坏或未包含 binary${plain}"
+        exit 1
+    fi
     rm v2node-linux.zip -f
     chmod +x v2node
     mkdir /etc/v2node/ -p
