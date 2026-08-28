@@ -29,6 +29,9 @@ func New(nodes []conf.NodeConfig) (*Node, error) {
 		if err != nil {
 			return nil, err
 		}
+		if node.DisableSniffing != nil && *node.DisableSniffing {
+			info.DisableSniffing = true
+		}
 		n.controllers[i] = NewController(p, &node, info)
 		n.NodeInfos[i] = info
 	}

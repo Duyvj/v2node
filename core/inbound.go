@@ -118,11 +118,13 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	ipAddress := net.ParseAddress(nodeInfo.Common.ListenIP)
 	in.ListenOn = &coreConf.Address{Address: ipAddress}
 	// Set SniffingConfig
-	sniffingConfig := &coreConf.SniffingConfig{
-		Enabled:      true,
-		DestOverride: coreConf.StringList{"http", "tls", "quic"},
+	if !nodeInfo.DisableSniffing && (nodeInfo.Common == nil || !nodeInfo.Common.DisableSniffing) {
+		sniffingConfig := &coreConf.SniffingConfig{
+			Enabled:      true,
+			DestOverride: coreConf.StringList{"http", "tls", "quic"},
+		}
+		in.SniffingConfig = sniffingConfig
 	}
-	in.SniffingConfig = sniffingConfig
 
 	// Set TLS or Reality settings
 	switch nodeInfo.Security {

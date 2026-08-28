@@ -51,7 +51,7 @@ func applyResourceSettings(r *conf.ResourceConfig) {
 		oldLimit := debug.SetMemoryLimit(limitBytes)
 		log.Infof("[Resource] Soft memory limit set to %d MB (previous: %d MB)", r.MemLimitMB, oldLimit/(1024*1024))
 	}
-	log.Infof("[Resource] Profile: %s, Pipe BufferSize: %d KB, ConnectionIdle: %ds", r.Profile, r.BufferSize, r.ConnectionIdle)
+	log.Infof("[Resource] Profile: %s, Pipe BufferSize: %d KB, ConnectionIdle: %ds, DisableSniffing: %t", r.Profile, r.BufferSize, r.ConnectionIdle, r.DisableSniffing)
 }
 
 func startPeriodicMemoryRelease(intervalSeconds int, stopCh <-chan struct{}) {

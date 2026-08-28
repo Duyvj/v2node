@@ -22,13 +22,14 @@ const (
 )
 
 type NodeInfo struct {
-	Id           int
-	Type         string
-	Security     int
-	PushInterval time.Duration
-	PullInterval time.Duration
-	Tag          string
-	Common       *CommonNode
+	Id              int
+	Type            string
+	Security        int
+	PushInterval    time.Duration
+	PullInterval    time.Duration
+	DisableSniffing bool
+	Tag             string
+	Common          *CommonNode
 }
 
 type CommonNode struct {
@@ -62,6 +63,7 @@ type CommonNode struct {
 	Obfs                    string `json:"obfs"`
 	ObfsPassword            string `json:"obfs_password"`
 	Ignore_Client_Bandwidth bool   `json:"ignore_client_bandwidth"`
+	DisableSniffing         bool   `json:"disable_sniffing"`
 }
 
 type Route struct {
@@ -72,10 +74,11 @@ type Route struct {
 }
 
 type BaseConfig struct {
-	PushInterval           any `json:"push_interval"`
-	PullInterval           any `json:"pull_interval"`
-	DeviceOnlineMinTraffic int `json:"device_online_min_traffic"`
-	NodeReportMinTraffic   int `json:"node_report_min_traffic"`
+	PushInterval           any  `json:"push_interval"`
+	PullInterval           any  `json:"pull_interval"`
+	DeviceOnlineMinTraffic int  `json:"device_online_min_traffic"`
+	NodeReportMinTraffic   int  `json:"node_report_min_traffic"`
+	DisableSniffing        bool `json:"disable_sniffing"`
 }
 
 type TlsSettings struct {
@@ -207,6 +210,10 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	// set interval
 	node.PushInterval = intervalToTime(cm.BaseConfig.PushInterval)
 	node.PullInterval = intervalToTime(cm.BaseConfig.PullInterval)
+
+	if cm.DisableSniffing || (cm.BaseConfig != nil && cm.BaseConfig.DisableSniffing) {
+		node.DisableSniffing = true
+	}
 
 	node.Common = cm
 

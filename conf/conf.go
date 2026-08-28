@@ -26,6 +26,7 @@ type ResourceConfig struct {
 	Handshake                     int    `mapstructure:"Handshake"`                     // Handshake timeout in seconds
 	UplinkOnly                    int    `mapstructure:"UplinkOnly"`                    // Uplink only timeout in seconds
 	DownlinkOnly                  int    `mapstructure:"DownlinkOnly"`                  // Downlink only timeout in seconds
+	DisableSniffing               bool   `mapstructure:"DisableSniffing"`               // Disable domain sniffing for performance and app compatibility
 	PeriodicMemoryReleaseInterval int    `mapstructure:"PeriodicMemoryReleaseInterval"` // Interval in seconds to release free memory back to OS (0 to disable)
 }
 
@@ -107,11 +108,12 @@ type LogConfig struct {
 }
 
 type NodeConfig struct {
-	APIHost    string `mapstructure:"ApiHost"`
-	NodeID     int    `mapstructure:"NodeID"`
-	Key        string `mapstructure:"ApiKey"`
-	Timeout    int    `mapstructure:"Timeout"`
-	RetryCount *int   `mapstructure:"RetryCount"`
+	APIHost         string `mapstructure:"ApiHost"`
+	NodeID          int    `mapstructure:"NodeID"`
+	Key             string `mapstructure:"ApiKey"`
+	Timeout         int    `mapstructure:"Timeout"`
+	RetryCount      *int   `mapstructure:"RetryCount"`
+	DisableSniffing *bool  `mapstructure:"DisableSniffing"`
 }
 
 func New() *Conf {
@@ -122,7 +124,8 @@ func New() *Conf {
 			Access: "none",
 		},
 		ResourceConfig: ResourceConfig{
-			Profile: "standard",
+			Profile:         "standard",
+			DisableSniffing: true,
 		},
 	}
 	c.ResourceConfig.ApplyDefaults()
@@ -148,10 +151,17 @@ func (p *Conf) LoadFromPath(filePath string) error {
 		if p.NodeConfigs[i].RetryCount == nil {
 			p.NodeConfigs[i].RetryCount = intPtr(DefaultNodeRetryCount)
 		}
+		if p.NodeConfigs[i].DisableSniffing == nil {
+			p.NodeConfigs[i].DisableSniffing = boolPtr(p.ResourceConfig.DisableSniffing)
+		}
 	}
 	return nil
 }
 
 func intPtr(v int) *int {
+	return &v
+}
+
+func boolPtr(v bool) *bool {
 	return &v
 }

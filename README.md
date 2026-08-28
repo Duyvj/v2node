@@ -11,6 +11,7 @@ Bản backend v2node tối ưu hóa tài nguyên (RAM, CPU, Goroutines, GC) dàn
 - **Runtime Memory Control**: Tích hợp Soft Memory Limit (`GOMEMLIMIT`) và điều chỉnh tỷ lệ thu gom rác (`GOGC`).
 - **Memory Scavenger**: Tự động thu gom và hoàn trả RAM không sử dụng về cho OS (`debug.FreeOSMemory()`).
 - **Giảm Pipe Buffer Overhead**: Giảm 75% - 87% bộ nhớ đệm (16KB - 32KB thay vì 256KB-512KB mặc định).
+- **DisableSniffing**: Hỗ trợ tắt domain sniffing để tiết kiệm CPU/RAM và tương thích hoàn hảo với các ứng dụng như Zalo, ngân hàng.
 - **Zero-Allocation Limiter**: Loại bỏ triệt để cấp phát rác trên từng kết nối/request.
 - **Leak-Free Task Runner**: Triệt tiêu rò rỉ goroutine và timer trong scheduler.
 - **Kích thước Binary nhỏ gọn**: Build tối ưu stripped symbols giảm ~32% dung lượng binary.
@@ -50,6 +51,7 @@ Thêm mục `"Resource"` vào file `/etc/v2node/config.json`:
     "GOGC": 50,
     "BufferSize": 16,
     "ConnectionIdle": 45,
+    "DisableSniffing": true,
     "PeriodicMemoryReleaseInterval": 60
   },
   "Nodes": [
@@ -57,7 +59,8 @@ Thêm mục `"Resource"` vào file `/etc/v2node/config.json`:
       "ApiHost": "https://your-panel.com",
       "ApiKey": "your_api_token",
       "NodeID": 1,
-      "Timeout": 15
+      "Timeout": 15,
+      "DisableSniffing": true
     }
   ]
 }
