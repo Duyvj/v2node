@@ -452,7 +452,7 @@ func (c *Client) ReportUserTraffic(ctx context.Context, reportID string, userTra
 	// from its response is too late: that panel may already have charged the
 	// body without recording the report ID. Keep the durable spool intact
 	// until ZBoard protocol 2 is deployed.
-	if reportID != "" {
+	if reportID != "" && c.AgentID != "" {
 		if err := c.requireTrafficProtocol2(ctx); err != nil {
 			return err
 		}
@@ -462,10 +462,12 @@ func (c *Client) ReportUserTraffic(ctx context.Context, reportID string, userTra
 	req := c.client.R().
 		SetContext(ctx).
 		SetBody(data).
-		ForceContentType("application/json").
-		SetHeader("X-ZNode-Traffic-Protocol", "2")
-	if reportID != "" {
-		req.SetHeader("X-ZNode-Traffic-Report-ID", reportID)
+		ForceContentType("application/json")
+	if c.AgentID != "" {
+		req.SetHeader("X-ZNode-Traffic-Protocol", "2")
+		if reportID != "" {
+			req.SetHeader("X-ZNode-Traffic-Report-ID", reportID)
+		}
 	}
 	response, err := req.Post(path)
 	if err != nil {
@@ -477,7 +479,7 @@ func (c *Client) ReportUserTraffic(ctx context.Context, reportID string, userTra
 		}
 		return fmt.Errorf("report user traffic: panel returned HTTP %d", response.StatusCode())
 	}
-	if reportID != "" {
+	if reportID != "" && c.AgentID != "" {
 		contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header().Get("Content-Type"), ";")[0]))
 		if contentType != "application/json" && !strings.HasSuffix(contentType, "+json") {
 			return fmt.Errorf("report user traffic: panel acknowledgement is not JSON")

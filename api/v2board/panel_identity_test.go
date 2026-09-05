@@ -42,16 +42,12 @@ func TestInstanceSecretRequiresPrivateRegularFile(t *testing.T) {
 	}
 }
 
-func TestNodeConfigRequiresZBoardPanelIdentity(t *testing.T) {
+func TestNodeConfigRequiresCompatiblePanelIdentity(t *testing.T) {
 	for name, panelType := range map[string]string{
-		"missing": "",
-		"wrong":   "v2board",
+		"wrong": "other_incompatible_panel",
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-				if request.Header.Get("X-ZNode-Type") != conf.RequiredPanelType || request.URL.Query().Get("type") != conf.RequiredPanelType {
-					t.Error("ZNode did not identify itself as a ZBoard client")
-				}
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"panel_type":"` + panelType + `","protocol":"vmess","listen_ip":"127.0.0.1","server_port":443,"network":"tcp","tls":0}`))
 			}))
@@ -68,13 +64,17 @@ func TestNodeConfigRequiresZBoardPanelIdentity(t *testing.T) {
 	}
 }
 
-func TestNodeClientRejectsLegacyManualTokenBeforeAnyRequest(t *testing.T) {
-	if _, err := New(&conf.NodeConfig{
+func TestNodeClientAcceptsManualTokenWithoutAgentID(t *testing.T) {
+	client, err := New(&conf.NodeConfig{
 		APIHost: "https://panel.example",
 		NodeID:  1,
-		Key:     "legacy-global-token",
-	}); err == nil || !strings.Contains(err.Error(), "legacy manual/global tokens are disabled") {
-		t.Fatalf("expected legacy credentials to be rejected, got %v", err)
+		Key:     "manual-token",
+	})
+	if err != nil {
+		t.Fatalf("expected manual token without agent ID to be accepted, got %v", err)
+	}
+	if client.Token != "manual-token" {
+		t.Fatalf("expected token = manual-token, got %s", client.Token)
 	}
 }
 

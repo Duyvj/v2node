@@ -191,7 +191,10 @@ func (e *EncSettings) UnmarshalJSON(data []byte) error {
 }
 
 func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
-	const path = "/api/v2/server/config"
+	path := "/api/v2/server/config"
+	if c.AgentID == "" {
+		path = "/api/v1/server/UniProxy/config"
+	}
 	r, err := c.client.
 		R().
 		SetContext(ctx).
@@ -203,6 +206,22 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	}
 	if r == nil {
 		return nil, fmt.Errorf("received nil response")
+	}
+
+	if r.StatusCode() == 404 && path == "/api/v2/server/config" {
+		path = "/api/v1/server/UniProxy/config"
+		r, err = c.client.
+			R().
+			SetContext(ctx).
+			SetHeader("If-None-Match", c.nodeEtag).
+			ForceContentType("application/json").
+			Get(path)
+		if err != nil {
+			return nil, err
+		}
+		if r == nil {
+			return nil, fmt.Errorf("received nil response")
+		}
 	}
 
 	if r.StatusCode() == 304 {
@@ -237,8 +256,9 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode node params error: %s", err)
 	}
-	if !strings.EqualFold(strings.TrimSpace(cm.PanelType), conf.RequiredPanelType) {
-		return nil, fmt.Errorf("invalid node config panel_type %q: ZNode requires %s", cm.PanelType, conf.RequiredPanelType)
+	panelType := strings.ToLower(strings.TrimSpace(cm.PanelType))
+	if panelType != "" && panelType != "v2board" && panelType != conf.RequiredPanelType {
+		return nil, fmt.Errorf("invalid node config panel_type %q", cm.PanelType)
 	}
 	switch cm.Protocol {
 	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless":

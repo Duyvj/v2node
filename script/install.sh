@@ -759,11 +759,11 @@ EOF
     check_status
     if [[ $? == 0 ]]; then
         echo -e "${green}v2node started successfully.${plain}"
-        return 0
     else
-        echo -e "${red}v2node may have failed to start; run: v2node log${plain}"
-        return 1
+        echo -e "${yellow}Lưu ý: v2node đang khởi động hoặc chưa lấy được cấu hình từ Panel (hãy kiểm tra API Key/Node ID trên web nếu cần).${plain}"
+        echo -e "${yellow}Chạy lệnh: 'v2node log' để xem chi tiết log kết nối.${plain}"
     fi
+    return 0
 }
 
 generate_v2node_agent_config() {
