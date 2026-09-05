@@ -192,9 +192,6 @@ func (e *EncSettings) UnmarshalJSON(data []byte) error {
 
 func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	path := "/api/v2/server/config"
-	if c.AgentID == "" {
-		path = "/api/v1/server/UniProxy/config"
-	}
 	r, err := c.client.
 		R().
 		SetContext(ctx).
@@ -233,6 +230,13 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 			return nil, fmt.Errorf("get node config: panel returned HTTP %d (%s)", r.StatusCode(), msg)
 		}
 		return nil, fmt.Errorf("get node config: panel returned HTTP %d", r.StatusCode())
+	}
+	var failResp struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(r.Body(), &failResp); err == nil && (failResp.Status == "fail" || failResp.Message == "token is error") {
+		return nil, fmt.Errorf("get node config: panel returned error (%s)", failResp.Message)
 	}
 	hash := sha256.Sum256(r.Body())
 	newBodyHash := hex.EncodeToString(hash[:])
