@@ -38,6 +38,9 @@ type NodeStatus struct {
 }
 
 func (c *Client) ReportNodeStatus(ctx context.Context, status NodeStatus) error {
+	if c.AgentID == "" {
+		return nil
+	}
 	const path = "/api/v1/server/UniProxy/status"
 	response, err := c.client.R().
 		SetContext(ctx).
