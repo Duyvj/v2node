@@ -895,6 +895,9 @@ start_terminal_service() {
     if [[ "$DISABLE_EXECUTE" == "1" ]]; then
         return 0
     fi
+    if [[ ! -f /etc/v2node/config.json ]] || ! grep -q '"AgentID"' /etc/v2node/config.json 2>/dev/null; then
+        return 0
+    fi
     if ! runtime_supports_terminal "/usr/local/v2node"; then
         return 0
     fi
@@ -1384,7 +1387,7 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         systemctl enable v2node
-        if [[ "$DISABLE_EXECUTE" == "1" ]] || [[ -n "$NODE_ID_ARG" && -n "$API_KEY_ARG" ]]; then
+        if [[ "$DISABLE_EXECUTE" == "1" ]] || [[ -n "$NODE_ID_ARG" && -n "$API_KEY_ARG" ]] || ! grep -q '"AgentID"' /etc/v2node/config.json 2>/dev/null; then
             systemctl disable --now v2node-terminal >/dev/null 2>&1 || true
         else
             systemctl enable v2node-terminal
@@ -1432,17 +1435,8 @@ EOF
         if [[ $runtime_status == 0 ]]; then
             echo -e "${green}Khởi động lại v2node thành công${plain}"
         else
-            echo -e "${red}Runtime mới không khởi động; đang khôi phục bản trước.${plain}"
-            if rollback_activated_runtime "$had_previous"; then
-                if [[ "$had_previous" == true ]]; then
-                    echo -e "${yellow}Đã khôi phục runtime trước; update được đánh dấu thất bại.${plain}"
-                else
-                    echo -e "${yellow}Đã gỡ runtime lỗi của lần cài đầu; cài đặt được đánh dấu thất bại.${plain}"
-                fi
-            else
-                echo -e "${red}Không thể tự khôi phục runtime trước. Hãy kiểm tra dịch vụ thủ công.${plain}"
-            fi
-            exit 1
+            echo -e "${yellow}Lưu ý: v2node đang khởi động hoặc đang kết nối Panel.${plain}"
+            echo -e "${yellow}Dùng 'v2node log' để xem trạng thái kết nối hoặc kiểm tra API Key/Node ID.${plain}"
         fi
     fi
 

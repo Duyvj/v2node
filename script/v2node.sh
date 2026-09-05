@@ -492,13 +492,8 @@ enable_terminal_service() {
 }
 
 start_terminal_service() {
-    if terminal_execution_disabled; then
-        if [[ x"${release}" == x"alpine" ]]; then
-            service v2node-terminal stop >/dev/null 2>&1 || true
-            rc-update del v2node-terminal default >/dev/null 2>&1 || true
-        else
-            systemctl disable --now v2node-terminal >/dev/null 2>&1 || true
-        fi
+    if terminal_execution_disabled || [[ ! -f /etc/v2node/config.json ]] || ! grep -q '"AgentID"' /etc/v2node/config.json 2>/dev/null; then
+        remove_terminal_service
         return 0
     fi
     if ! runtime_supports_terminal; then
@@ -649,11 +644,16 @@ uninstall() {
 start() {
     check_status
     if [[ $? == 0 ]]; then
-        if start_terminal_service; then
-            echo ""
-            echo -e "${green}v2node và dịch vụ terminal riêng đang ở trạng thái mong muốn.${plain}"
+        if grep -q '"AgentID"' /etc/v2node/config.json 2>/dev/null; then
+            if start_terminal_service; then
+                echo ""
+                echo -e "${green}v2node và dịch vụ terminal riêng đang ở trạng thái mong muốn.${plain}"
+            else
+                echo -e "${red}v2node đang chạy nhưng dịch vụ terminal riêng không khởi động được.${plain}"
+            fi
         else
-            echo -e "${red}v2node đang chạy nhưng dịch vụ terminal riêng không khởi động được.${plain}"
+            echo ""
+            echo -e "${green}v2node đang chạy bình thường.${plain}"
         fi
     else
         start_v2node_service

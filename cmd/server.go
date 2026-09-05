@@ -30,7 +30,7 @@ var (
 
 var serverCommand = cobra.Command{
 	Use:   "server",
-	Short: "Run znode server",
+	Short: "Run v2node server",
 	Run:   serverHandle,
 	Args:  cobra.NoArgs,
 }
@@ -45,7 +45,7 @@ func init() {
 	command.AddCommand(&serverCommand)
 }
 
-func serverHandle(_ *cobra.Command, _ []string) {
+func serverHandle(cmd *cobra.Command, args []string) {
 	showVersion()
 	panel.SetClientVersion(version)
 	log.SetFormatter(&log.TextFormatter{
@@ -59,10 +59,24 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		log.Warn("geoip.dat and geosite.dat were not found together; geoip:/geosite: routing rules may fail")
 	}
 
-	prepared, err := prepareInitialRuntime(config)
-	if err != nil {
-		log.WithField("err", err).Error("Prepare node runtime failed")
-		return
+	osSignals := make(chan os.Signal, 1)
+	signal.Notify(osSignals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(osSignals)
+
+	var prepared *preparedRuntime
+	for {
+		var err error
+		prepared, err = prepareInitialRuntime(config)
+		if err == nil {
+			break
+		}
+		log.WithField("err", err).Error("Prepare node runtime failed; will retry in 10s (check API Key / Node ID or panel status)")
+		select {
+		case <-osSignals:
+			log.Info("Shutdown signal received")
+			return
+		case <-time.After(10 * time.Second):
+		}
 	}
 	if prepared.offline {
 		log.WithFields(log.Fields{
@@ -130,9 +144,6 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	}
 
 	runtime.GC()
-	osSignals := make(chan os.Signal, 1)
-	signal.Notify(osSignals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(osSignals)
 
 	for {
 		select {
