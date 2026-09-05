@@ -9,7 +9,7 @@ export CGO_ENABLED=0
 export GOEXPERIMENT=jsonv2
 
 VERSION="${VERSION:-$(git describe --tags --always 2>/dev/null || echo "custom")}"
-LDFLAGS="-s -w -X 'github.com/wyx2685/v2node/cmd.Version=${VERSION}'"
+LDFLAGS="-s -w -X 'github.com/wyx2685/v2node/cmd.version=${VERSION}'"
 
 OUTPUT_NAME="${OUTPUT_NAME:-v2node}"
 

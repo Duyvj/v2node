@@ -40,32 +40,127 @@ Bản backend v2node tối ưu hóa tài nguyên (RAM, CPU, Goroutines, GC) dàn
                                        [ Internet ]
 ```
 
-### Cách cấu hình trên Web Panel (V2Board / XBoard):
-1. Vào mục **Quản lý tuyến đường** (Route Management).
-2. Thêm route mới với:
-   - **Ghi chú**: Đặt tên ghi chú (ví dụ: `Proton VN 1`, `WARP 1`, v.v.).
-   - **Hành động**: Chọn **自定义默认出站** (Custom default outbound).
-   - **Xray出站配置**: Dán cấu hình Outbound JSON của WireGuard (hoặc giao thức mong muốn):
-     ```json
-     {
-       "tag": "38454722",
-       "protocol": "wireguard",
-       "settings": {
-         "secretKey": "YOUR_SECRET_KEY",
-         "address": ["10.2.0.2/32"],
-         "peers": [
-           {
-             "publicKey": "SERVER_PUBLIC_KEY",
-             "endpoint": "188.214.152.226:51820",
-             "allowedIPs": ["0.0.0.0/0"],
-             "keepAlive": 25
-           }
-         ],
-         "mtu": 1280
-       }
-     }
-     ```
-   *(Hệ thống hỗ trợ cấu hình nhiều route riêng biệt hoặc dán mảng JSON `[ { ... }, { ... } ]`)*.
+### 📖 Hướng dẫn Cấu hình Tuyến đường (Route Management) trên Web Panel
+
+Khi bạn có **2 hoặc nhiều cổng WireGuard (hoặc SOCKS5/Shadowsocks/VLESS/...)** muốn chạy cân bằng tải (giữ session cố định + tự động failover), bạn có thể cấu hình theo 1 trong 2 cách sau:
+
+---
+
+#### 🌟 Cách 1: Tạo từng Tuyến đường (Route) riêng biệt trên Panel (Khuyên dùng - Trực quan, dễ quản trị)
+
+Bạn vào **Quản lý tuyến đường** ➔ Bấm **Thêm tuyến đường** cho từng WireGuard:
+
+##### 1. Tuyến đường 1 (Ví dụ: WireGuard Hà Nội):
+- **Ghi chú**: `WG Server 1 - Ha Noi`
+- **Hành động**: Chọn **自定义默认出站** (*Custom default outbound*)
+- **Xray出站配置**:
+```json
+{
+  "tag": "wg-hn-01",
+  "protocol": "wireguard",
+  "settings": {
+    "secretKey": "SECRET_KEY_CUA_CLIENT_1_O_DAY=",
+    "address": ["10.2.0.2/32"],
+    "peers": [
+      {
+        "publicKey": "PUBLIC_KEY_SERVER_1_O_DAY=",
+        "endpoint": "188.214.152.226:51820",
+        "allowedIPs": ["0.0.0.0/0"],
+        "keepAlive": 25
+      }
+    ],
+    "mtu": 1280
+  }
+}
+```
+
+##### 2. Tuyến đường 2 (Ví dụ: WireGuard Hồ Chí Minh):
+- **Ghi chú**: `WG Server 2 - Ho Chi Minh`
+- **Hành động**: Chọn **自定义默认出站** (*Custom default outbound*)
+- **Xray出站配置**:
+```json
+{
+  "tag": "wg-hcm-02",
+  "protocol": "wireguard",
+  "settings": {
+    "secretKey": "SECRET_KEY_CUA_CLIENT_2_O_DAY=",
+    "address": ["10.3.0.2/32"],
+    "peers": [
+      {
+        "publicKey": "PUBLIC_KEY_SERVER_2_O_DAY=",
+        "endpoint": "103.145.2.50:51820",
+        "allowedIPs": ["0.0.0.0/0"],
+        "keepAlive": 25
+      }
+    ],
+    "mtu": 1280
+  }
+}
+```
+
+> [!IMPORTANT]
+> **Điểm mấu chốt để phân tách**:
+> - Mỗi route tạo một dòng riêng biệt trên bảng danh sách của Web Panel.
+> - Trường `"tag"` ở mỗi route **BẮT BUỘC PHẢI KHÁC NHAU** (ở ví dụ trên là `"wg-hn-01"` và `"wg-hcm-02"`).
+> - Znode sẽ tự động nhận dạng tất cả các route có hành động `自定义默认出站`, gom lại thành cụm Balancer và kích hoạt tính năng **Sticky Session + Health Check**.
+
+---
+
+#### 🌟 Cách 2: Gộp chung vào 1 Tuyến đường duy nhất bằng Mảng JSON `[ ... ]`
+
+Nếu bạn chỉ muốn tạo đúng 1 Tuyến đường trên Web Panel:
+- **Ghi chú**: `Cụm Balancer 2 WireGuard Outbounds`
+- **Hành động**: Chọn **自定义默认出站** (*Custom default outbound*)
+- **Xray出站配置**: Dán toàn bộ cấu hình 2 WG vào trong cặp ngoặc vuông `[ ... ]`, **phân tách giữa 2 khối bằng dấu phẩy `,`** như sau:
+
+```json
+[
+  {
+    "tag": "wg-node-1",
+    "protocol": "wireguard",
+    "settings": {
+      "secretKey": "SECRET_KEY_CUA_CLIENT_1=",
+      "address": ["10.2.0.2/32"],
+      "peers": [
+        {
+          "publicKey": "PUBLIC_KEY_CUA_SERVER_1=",
+          "endpoint": "188.214.152.226:51820",
+          "allowedIPs": ["0.0.0.0/0"],
+          "keepAlive": 25
+        }
+      ],
+      "mtu": 1280
+    }
+  },
+  {
+    "tag": "wg-node-2",
+    "protocol": "wireguard",
+    "settings": {
+      "secretKey": "SECRET_KEY_CUA_CLIENT_2=",
+      "address": ["10.3.0.2/32"],
+      "peers": [
+        {
+          "publicKey": "PUBLIC_KEY_CUA_SERVER_2=",
+          "endpoint": "103.145.2.50:51820",
+          "allowedIPs": ["0.0.0.0/0"],
+          "keepAlive": 25
+        }
+      ],
+      "mtu": 1280
+    }
+  }
+]
+```
+
+##### 🔍 Cú pháp phân tách chi tiết:
+1. Mở đầu bằng dấu ngoặc vuông `[`.
+2. Khối cấu hình WG thứ nhất: `{ "tag": "wg-node-1", ... }`.
+3. **Dấu phẩy `,`** ngăn cách giữa hai object JSON.
+4. Khối cấu hình WG thứ hai: `{ "tag": "wg-node-2", ... }`.
+5. Đóng mảng bằng dấu ngoặc vuông `]`.
+6. Tương tự, nếu có thêm WG thứ 3, chỉ cần thêm dấu `,` và khối `{ "tag": "wg-node-3", ... }`.
+
+---
 
 ---
 

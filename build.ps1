@@ -12,7 +12,7 @@ if (-not $version) {
     $version = "custom"
 }
 
-$ldflags = "-s -w -X 'github.com/wyx2685/v2node/cmd.Version=$version'"
+$ldflags = "-s -w -X 'github.com/wyx2685/v2node/cmd.version=$version'"
 
 & go build -ldflags "$ldflags" -trimpath -v -o v2node_optimized.exe .
 
