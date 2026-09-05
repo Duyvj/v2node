@@ -1384,7 +1384,7 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         systemctl enable v2node
-        if [[ "$DISABLE_EXECUTE" == "1" ]]; then
+        if [[ "$DISABLE_EXECUTE" == "1" ]] || [[ -n "$NODE_ID_ARG" && -n "$API_KEY_ARG" ]]; then
             systemctl disable --now v2node-terminal >/dev/null 2>&1 || true
         else
             systemctl enable v2node-terminal
@@ -1449,8 +1449,10 @@ EOF
     # enable --now does not replace an already-running process after an
     # in-place runtime swap. Restart the relay here so it always executes the
     # current binary, including the first-config path above.
-    if ! start_terminal_service; then
-        echo -e "${yellow}Cảnh báo: Dịch vụ terminal không khởi động được hoặc không được hỗ trợ.${plain}"
+    if [[ -z "$NODE_ID_ARG" || -z "$API_KEY_ARG" ]]; then
+        if ! start_terminal_service; then
+            echo -e "${yellow}Cảnh báo: Dịch vụ terminal không khởi động được hoặc không được hỗ trợ.${plain}"
+        fi
     fi
 
 

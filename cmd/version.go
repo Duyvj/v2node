@@ -8,8 +8,8 @@ import (
 
 var (
 	version  = "TempVersion" //use ldflags replace
-	codename = "znode"
-	intro    = "ZBoard-only backend based on modified xray-core"
+	codename = "v2node"
+	intro    = "V2Board/XBoard backend based on modified xray-core"
 )
 
 var versionCommand = cobra.Command{

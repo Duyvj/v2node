@@ -9,7 +9,7 @@ import (
 )
 
 var command = &cobra.Command{
-	Use: "znode",
+	Use: "v2node",
 }
 
 func Run() {

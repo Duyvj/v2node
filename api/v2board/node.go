@@ -228,6 +228,10 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 		return nil, nil
 	}
 	if r.IsError() {
+		msg := strings.TrimSpace(string(r.Body()))
+		if msg != "" {
+			return nil, fmt.Errorf("get node config: panel returned HTTP %d (%s)", r.StatusCode(), msg)
+		}
 		return nil, fmt.Errorf("get node config: panel returned HTTP %d", r.StatusCode())
 	}
 	hash := sha256.Sum256(r.Body())

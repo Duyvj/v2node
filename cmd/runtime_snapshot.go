@@ -51,7 +51,7 @@ func prepareInitialRuntime(configPath string) (*preparedRuntime, error) {
 	}
 	prepared, snapshotErr := prepareRuntimeFromSnapshot(configPath)
 	if snapshotErr != nil {
-		return nil, fmt.Errorf("online preparation failed: %w; offline snapshot unavailable: %v", onlineErr, snapshotErr)
+		return nil, onlineErr
 	}
 	prepared.offline = true
 	prepared.offlineCause = onlineErr
