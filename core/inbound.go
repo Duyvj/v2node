@@ -247,6 +247,21 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	default:
 		break
 	}
+
+	// Optimize TCP socket keepalive to eliminate carrier NAT timeouts and prevent connection drops
+	if in.StreamSetting == nil {
+		in.StreamSetting = &coreConf.StreamConfig{}
+	}
+	if in.StreamSetting.SocketSettings == nil {
+		in.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
+	}
+	if in.StreamSetting.SocketSettings.TCPKeepAliveInterval == 0 {
+		in.StreamSetting.SocketSettings.TCPKeepAliveInterval = 15
+	}
+	if in.StreamSetting.SocketSettings.TCPKeepAliveIdle == 0 {
+		in.StreamSetting.SocketSettings.TCPKeepAliveIdle = 15
+	}
+
 	in.Tag = tag
 	return in.Build()
 }

@@ -30,6 +30,12 @@ func buildDefaultOutbound() (*core.OutboundHandlerConfig, error) {
 		return nil, fmt.Errorf("marshal proxy config error: %s", err)
 	}
 	outboundDetourConfig.Settings = &setting
+	outboundDetourConfig.StreamSetting = &conf.StreamConfig{
+		SocketSettings: &conf.SocketConfig{
+			TCPKeepAliveInterval: 15,
+			TCPKeepAliveIdle:     15,
+		},
+	}
 	return outboundDetourConfig.Build()
 }
 

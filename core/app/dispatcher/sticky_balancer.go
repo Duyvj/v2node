@@ -168,7 +168,7 @@ func (b *StickyBalancer) PickOutbound(sessionKey string) string {
 		counts[h] = 0
 	}
 	for _, entry := range b.sessions {
-		if now.Sub(entry.lastSeen) < 10*time.Minute {
+		if now.Sub(entry.lastSeen) < 60*time.Minute {
 			if _, ok := counts[entry.tag]; ok {
 				counts[entry.tag]++
 			}
@@ -196,7 +196,7 @@ func (b *StickyBalancer) PickOutbound(sessionKey string) string {
 }
 
 func (b *StickyBalancer) cleanupLoop() {
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
@@ -205,7 +205,7 @@ func (b *StickyBalancer) cleanupLoop() {
 		case now := <-ticker.C:
 			b.mu.Lock()
 			for k, v := range b.sessions {
-				if now.Sub(v.lastSeen) > 10*time.Minute {
+				if now.Sub(v.lastSeen) > 60*time.Minute {
 					delete(b.sessions, k)
 				}
 			}

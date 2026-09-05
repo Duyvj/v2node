@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 
 set -o pipefail
 umask 077
@@ -1087,7 +1087,46 @@ install_manager_script() {
     fi
 }
 
+optimize_kernel_network() {
+    if [[ -d /etc/sysctl.d ]]; then
+        cat << 'EOF' > /etc/sysctl.d/99-v2node.conf
+# v2node Network & Transmission Optimization
+fs.file-max = 1048576
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.somaxconn = 65535
+net.core.netdev_max_backlog = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_keepalive_time = 30
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 3
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_notsent_lowat = 16384
+EOF
+        sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-v2node.conf >/dev/null 2>&1 || true
+    fi
+
+    if [[ -d /etc/security/limits.d ]]; then
+        cat << 'EOF' > /etc/security/limits.d/99-v2node.conf
+* soft nofile 262144
+* hard nofile 262144
+* soft nproc 65535
+* hard nproc 65535
+root soft nofile 262144
+root hard nofile 262144
+root soft nproc 65535
+root hard nproc 65535
+EOF
+    fi
+}
+
 install_v2node() {
+    optimize_kernel_network
     local version_param="$1"
     local current_directory="/usr/local/v2node"
     local previous_directory="/usr/local/v2node.previous"
@@ -1257,13 +1296,11 @@ Type=simple
 Environment=XRAY_LOCATION_ASSET=/etc/v2node
 LimitNOFILE=262144
 TasksMax=8192
-MemoryHigh=80%
-MemoryMax=90%
 WorkingDirectory=/usr/local/v2node/
 ExecStart=/usr/local/v2node/v2node server
 TimeoutStopSec=45s
 Restart=always
-RestartSec=10
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target

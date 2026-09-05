@@ -5,13 +5,13 @@
     "Access": "none"
   },
   "Resource": {
-    "Profile": "low",
-    "MemLimitMB": 256,
-    "GOGC": 50,
-    "BufferSize": 16,
-    "ConnectionIdle": 45,
+    "Profile": "standard",
+    "MemLimitMB": 512,
+    "GOGC": 80,
+    "BufferSize": 128,
+    "ConnectionIdle": 300,
     "DisableSniffing": true,
-    "PeriodicMemoryReleaseInterval": 60
+    "PeriodicMemoryReleaseInterval": 0
   },
   "Nodes": [
     {

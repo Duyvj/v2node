@@ -48,63 +48,66 @@ func (r *ResourceConfig) ApplyDefaults() {
 			r.GOGC = 50
 		}
 		if r.BufferSize == 0 {
-			r.BufferSize = 16
+			r.BufferSize = 64
 		}
 		if r.ConnectionIdle == 0 {
-			r.ConnectionIdle = 45
+			r.ConnectionIdle = 300
 		}
 		if r.Handshake == 0 {
-			r.Handshake = 4
+			r.Handshake = 8
 		}
 		if r.UplinkOnly == 0 {
-			r.UplinkOnly = 1
+			r.UplinkOnly = 5
 		}
 		if r.DownlinkOnly == 0 {
-			r.DownlinkOnly = 2
+			r.DownlinkOnly = 10
 		}
 		if r.PeriodicMemoryReleaseInterval == 0 {
-			r.PeriodicMemoryReleaseInterval = 60
+			r.PeriodicMemoryReleaseInterval = 0
 		}
 	case "high", "high_performance":
 		if r.GOGC == 0 {
 			r.GOGC = 100
 		}
 		if r.BufferSize == 0 {
-			r.BufferSize = 128
+			r.BufferSize = 256
 		}
 		if r.ConnectionIdle == 0 {
-			r.ConnectionIdle = 120
+			r.ConnectionIdle = 600
 		}
 		if r.Handshake == 0 {
-			r.Handshake = 4
+			r.Handshake = 10
 		}
 		if r.UplinkOnly == 0 {
-			r.UplinkOnly = 2
+			r.UplinkOnly = 5
 		}
 		if r.DownlinkOnly == 0 {
-			r.DownlinkOnly = 4
+			r.DownlinkOnly = 10
+		}
+		if r.PeriodicMemoryReleaseInterval == 0 {
+			r.PeriodicMemoryReleaseInterval = 0
 		}
 	default: // "standard"
 		if r.GOGC == 0 {
 			r.GOGC = 80
 		}
 		if r.BufferSize == 0 {
-			r.BufferSize = 32
+			r.BufferSize = 128
 		}
 		if r.ConnectionIdle == 0 {
-			r.ConnectionIdle = 60
+			r.ConnectionIdle = 300
 		}
 		if r.Handshake == 0 {
-			r.Handshake = 4
+			r.Handshake = 8
 		}
 		if r.UplinkOnly == 0 {
-			r.UplinkOnly = 2
+			r.UplinkOnly = 5
 		}
 		if r.DownlinkOnly == 0 {
-			r.DownlinkOnly = 4
+			r.DownlinkOnly = 10
 		}
 		if r.PeriodicMemoryReleaseInterval == 0 {
-			r.PeriodicMemoryReleaseInterval = 120
+			r.PeriodicMemoryReleaseInterval = 0
 		}
 	}
 }
@@ -213,14 +216,14 @@ func New() *Conf {
 			DisableSniffing: true,
 		},
 		ConnectionConfig: ConnectionConfig{
-			Handshake:                 15,
-			ConnIdle:                  60,
-			UplinkOnly:                2,
-			DownlinkOnly:              4,
-			BufferSize:                32,
+			Handshake:                 8,
+			ConnIdle:                  300,
+			UplinkOnly:                5,
+			DownlinkOnly:              10,
+			BufferSize:                128,
 			DisableUDPContentSniffing: true,
-			MaxConnectionsPerUser:     128,
-			MaxConnections:            32768,
+			MaxConnectionsPerUser:     1024,
+			MaxConnections:            65536,
 		},
 		AgentConfig: AgentConfig{PollInterval: 15},
 	}
@@ -368,28 +371,28 @@ func NormalizePanelAPIHost(raw string) (string, error) {
 
 func (c *ConnectionConfig) applyDefaults() {
 	if c.Handshake == 0 {
-		c.Handshake = 15
+		c.Handshake = 8
 	}
 	if c.ConnIdle == 0 {
-		c.ConnIdle = 120
+		c.ConnIdle = 300
 	}
 	if c.UplinkOnly == 0 {
-		c.UplinkOnly = 2
+		c.UplinkOnly = 5
 	}
 	if c.DownlinkOnly == 0 {
-		c.DownlinkOnly = 4
+		c.DownlinkOnly = 10
 	}
 	if c.BufferSize <= 0 {
 		c.BufferSize = 128
 	}
 	if c.MaxConnectionsPerUser <= 0 {
-		c.MaxConnectionsPerUser = 128
+		c.MaxConnectionsPerUser = 1024
 	}
 	if c.MaxConnections <= 0 {
-		c.MaxConnections = 32768
+		c.MaxConnections = 65536
 	}
-	if c.MaxConnectionsPerUser > 4096 {
-		c.MaxConnectionsPerUser = 4096
+	if c.MaxConnectionsPerUser > 8192 {
+		c.MaxConnectionsPerUser = 8192
 	}
 	if c.MaxConnections > 262144 {
 		c.MaxConnections = 262144

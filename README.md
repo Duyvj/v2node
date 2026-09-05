@@ -8,17 +8,19 @@ Bản backend v2node tối ưu hóa tài nguyên (RAM, CPU, Goroutines, GC) dàn
 
 ## ⚡ Các tính năng nổi bật & Tối ưu hóa
 
+- **Tối ưu hóa Kết nối & Đường truyền Siêu Ổn định (Không Gián đoạn)**:
+  - **TCP KeepAlive 15s Toàn diện**: Tích hợp trực tiếp vào tầng socket của mọi Inbound và Outbound, xóa bỏ hoàn toàn hiện tượng nhà mạng di động (4G/5G Viettel, Vina, Mobi) và router NAT tự động ngắt ngầm các kết nối rảnh.
+  - **ConnectionIdle 300s (5 phút)**: Giữ kết nối liên tục và bền bỉ khi người dùng đọc báo, tạm dừng stream, treo game hoặc để ứng dụng chạy nền mà không lo bị ngắt ngang.
+  - **Bộ đệm tốc độ cao (Pipe Buffer 64KB - 256KB)**: Tối ưu băng thông cho mạng cáp quang và 4G/5G tốc độ cao, xem 4K/8K không bị khựng (zero buffering) hay nghẽn TCP window.
+  - **Mở rộng Kết nối Đồng thời (MaxConnectionsPerUser: 1024, Global: 65536)**: Thỏa sức mở nhiều tab trình duyệt, đa thiết bị mà không bị chặn lỗi session limit.
+  - **Tối ưu Linux Kernel BBR + FQ**: Tự động tinh chỉnh kernel stack (BBR congestion control, buffer TCP 16MB, backlog queue 65535) khi cài đặt qua script.
 - **Quản lý tuyến đường thông minh (Sticky Balancer & Health Check)**:
   - Tự động nhận diện và gom các tuyến đường xuất trạm mặc định (**自定义默认出站** / `default_out`) từ Web Panel vào bộ cân bằng tải **Balancer**.
-  - **Cố định phiên (Sticky Session)**: Mỗi phiên người dùng (`user.Email` hoặc IP nguồn thiết bị) được giữ cố định vào cùng một cổng outbound trong suốt phiên làm việc. Khắc phục triệt để lỗi nhảy IP giữa chừng gây văng app ngân hàng, Zalo, Captcha Cloudflare, lỗi session game.
+  - **Cố định phiên (Sticky Session 60 phút)**: Mỗi phiên người dùng (`user.Email` hoặc IP nguồn thiết bị) được giữ cố định suốt 60 phút vào cùng một cổng outbound. Khắc phục triệt để lỗi nhảy IP giữa chừng gây văng app ngân hàng, Zalo, Captcha Cloudflare, lỗi session game.
   - **Kiểm tra sức khỏe tự động (Health Check / Observatory)**: Tự động ping thăm dò (`http://cp.cloudflare.com/generate_204`) các cổng outbound song song mỗi 10 giây. Tự động chuyển hướng (Failover) mượt mà sang các cổng còn sống nếu một cổng gặp sự cố.
-  - **Dọn dẹp phiên tự động**: Tự động giải phóng bộ nhớ cho các phiên không hoạt động quá 10 phút.
 - **Mặc định bật DisableSniffing**: Mặc định kích hoạt `"DisableSniffing": true` trên toàn hệ thống để tiết kiệm tối đa CPU/RAM và tương thích 100% với các ứng dụng nhạy cảm (Zalo, ngân hàng, VoIP, UDP).
-- **Runtime Memory Control**: Tích hợp Soft Memory Limit (`GOMEMLIMIT`) và điều chỉnh tỷ lệ thu gom rác (`GOGC`).
-- **Memory Scavenger**: Tự động thu gom và hoàn trả RAM không sử dụng về cho OS (`debug.FreeOSMemory()`).
-- **Giảm Pipe Buffer Overhead**: Giảm 75% - 87% bộ nhớ đệm (16KB - 32KB thay vì 256KB-512KB mặc định).
+- **Runtime Memory Control**: Tích hợp Soft Memory Limit (`GOMEMLIMIT`) và điều chỉnh tỷ lệ thu gom rác (`GOGC`), sử dụng Go background scavenger mượt mà không gây khựng STW.
 - **Zero-Allocation Limiter**: Loại bỏ triệt để cấp phát rác trên từng kết nối/request.
-- **Leak-Free Task Runner**: Triệt tiêu rò rỉ goroutine và timer trong scheduler.
 - **Kích thước Binary nhỏ gọn**: Build tối ưu stripped symbols giảm ~32% dung lượng binary.
 
 ---
@@ -192,13 +194,13 @@ Mục `"Resource"` trong file `/etc/v2node/config.json`:
     "Access": "none"
   },
   "Resource": {
-    "Profile": "low",
-    "MemLimitMB": 256,
-    "GOGC": 50,
-    "BufferSize": 16,
-    "ConnectionIdle": 45,
+    "Profile": "standard",
+    "MemLimitMB": 512,
+    "GOGC": 80,
+    "BufferSize": 128,
+    "ConnectionIdle": 300,
     "DisableSniffing": true,
-    "PeriodicMemoryReleaseInterval": 60
+    "PeriodicMemoryReleaseInterval": 0
   },
   "Nodes": [
     {
@@ -213,9 +215,9 @@ Mục `"Resource"` trong file `/etc/v2node/config.json`:
 ```
 
 ### Các Profile sẵn có:
-- **`"low"`**: Tối ưu tối đa cho VPS 512MB RAM (`BufferSize: 16KB`, `GOGC: 50`, `ConnectionIdle: 45s`).
-- **`"standard"`** *(mặc định)*: Cân bằng hiệu năng và tài nguyên (`BufferSize: 32KB`, `GOGC: 80`, `ConnectionIdle: 60s`).
-- **`"high_performance"`**: Dành cho server băng thông cực lớn (`BufferSize: 128KB`, `GOGC: 100`, `ConnectionIdle: 120s`).
+- **`"low"`**: Tối ưu cho VPS 512MB RAM (`BufferSize: 64KB`, `GOGC: 50`, `ConnectionIdle: 300s`).
+- **`"standard"`** *(mặc định)*: Cân bằng lý tưởng tốc độ & ổn định tuyệt đối (`BufferSize: 128KB`, `GOGC: 80`, `ConnectionIdle: 300s`).
+- **`"high_performance"`**: Dành cho máy chủ tải cực lớn (`BufferSize: 256KB`, `GOGC: 100`, `ConnectionIdle: 600s`).
 
 ---
 
