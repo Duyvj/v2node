@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 
 set -o pipefail
 umask 077
@@ -894,10 +894,73 @@ show_v2node_version() {
     fi
 }
 
+generate_v2node_config() {
+    local api_host="$1"
+    local node_id="$2"
+    local api_key="$3"
+
+    mkdir -p /etc/v2node >/dev/null 2>&1
+    cat > /etc/v2node/config.json <<EOF
+{
+    "type": "v2board",
+    "Log": {
+        "Level": "warning",
+        "Output": "",
+        "Access": "none"
+    },
+    "ConnectionConfig": {
+        "Handshake": 15,
+        "ConnIdle": 300,
+        "UplinkOnly": 2,
+        "DownlinkOnly": 4,
+        "BufferSize": 128,
+        "DisableUDPContentSniffing": true,
+        "MaxConnectionsPerUser": 1024,
+        "MaxConnections": 65535
+    },
+    "Resource": {
+        "Profile": "standard",
+        "MemLimitMB": 512,
+        "GOGC": 80,
+        "BufferSize": 128,
+        "ConnectionIdle": 300,
+        "DisableSniffing": true,
+        "PeriodicMemoryReleaseInterval": 0
+    },
+    "Nodes": [
+        {
+            "ApiHost": "${api_host}",
+            "NodeID": ${node_id},
+            "ApiKey": "${api_key}",
+            "Timeout": 15,
+            "DisableSniffing": true
+        }
+    ]
+}
+EOF
+    chmod 600 /etc/v2node/config.json
+    echo -e "${green}Đã tạo cấu hình V2Board thành công tại /etc/v2node/config.json${plain}"
+    restart 0
+}
+
 generate_config_file() {
-    echo -e "${red}Legacy global API-key enrollment is disabled.${plain}"
-    echo "Create or rotate a per-VPS Agent in ZBoard and run its enrollment command instead."
-    return 1
+    read -rp "Địa chỉ API Panel [ví dụ: https://ezviet.xyz]: " api_host
+    if [[ -z "$api_host" ]]; then
+        echo -e "${red}Địa chỉ API không được để trống!${plain}"
+        return 1
+    fi
+    read -rp "Node ID: " node_id
+    if [[ -z "$node_id" || ! "$node_id" =~ ^[0-9]+$ ]]; then
+        echo -e "${red}Node ID phải là số nguyên dương!${plain}"
+        return 1
+    fi
+    read -rp "Node Api Key: " api_key
+    if [[ -z "$api_key" ]]; then
+        echo -e "${red}Api Key không được để trống!${plain}"
+        return 1
+    fi
+
+    generate_v2node_config "$api_host" "$node_id" "$api_key"
 }
 
 show_usage() {
@@ -912,7 +975,7 @@ show_usage() {
     echo "v2node disable      - Tắt tự khởi động cùng hệ thống"
     echo "v2node log          - Xem nhật ký v2node"
     echo "v2node x25519       - Tạo khóa x25519"
-    echo "v2node generate     - Hướng dẫn enrollment Agent qua ZBoard"
+    echo "v2node generate     - Tạo cấu hình kết nối V2Board / XBoard"
     echo "v2node update       - Cập nhật v2node"
     echo "v2node update x.x.x - Cài phiên bản v2node chỉ định"
     echo "v2node rollback     - Quay lại bản v2node trước đó"
@@ -943,7 +1006,7 @@ show_menu() {
 ————————————————
   ${green}11.${plain} Xem phiên bản v2node
   ${green}12.${plain} Nâng cấp script quản lý v2node
-  ${green}13.${plain} Hướng dẫn enrollment Agent qua ZBoard
+  ${green}13.${plain} Tạo cấu hình kết nối V2Board / XBoard
   ${green}14.${plain} Thoát script
  "
  # Có thể bổ sung chức năng mới vào menu phía trên

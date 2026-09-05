@@ -265,55 +265,13 @@ ensure_instance_secret() {
 # in place, while an explicit incompatible type is never overwritten.
 ensure_zboard_config_type() {
     local config_file="/etc/v2node/config.json"
-    local temporary
     [[ -f "$config_file" ]] || return 0
-
-    if grep -Eqi '"type"[[:space:]]*:' "$config_file"; then
-        if grep -Eqi '"type"[[:space:]]*:[[:space:]]*"zboard"' "$config_file"; then
-            secure_v2node_config_permissions
-            return $?
-        fi
-        echo -e "${red}Cấu hình V2Node có type không tương thích; yêu cầu type=zboard.${plain}"
-        return 1
-    fi
-
-    temporary=$(mktemp "${config_file}.XXXXXX") || return 1
-    if ! awk '
-        BEGIN { inserted = 0 }
-        !inserted {
-            position = index($0, "{")
-            if (position > 0) {
-                print substr($0, 1, position)
-                print "    \"type\": \"zboard\","
-                remainder = substr($0, position + 1)
-                if (length(remainder) > 0) print remainder
-                inserted = 1
-                next
-            }
-        }
-        { print }
-        END { if (!inserted) exit 2 }
-    ' "$config_file" > "$temporary"; then
-        rm -f "$temporary"
-        echo -e "${red}Không thể thêm type=zboard vào cấu hình hiện tại.${plain}"
-        return 1
-    fi
-    if ! grep -Eqi '"type"[[:space:]]*:[[:space:]]*"zboard"' "$temporary"; then
-        rm -f "$temporary"
-        echo -e "${red}Không thể xác nhận type=zboard trong cấu hình mới.${plain}"
-        return 1
-    fi
-    chmod 600 "$temporary"
-    mv -f "$temporary" "$config_file"
-    secure_v2node_config_permissions || return 1
-    echo -e "${green}Đã khóa cấu hình V2Node với type=zboard.${plain}"
+    secure_v2node_config_permissions
+    return 0
 }
 
 reject_legacy_v2node_config() {
-    if [[ -f /etc/v2node/config.json && ! -f /etc/v2node/config.json ]]; then
-        echo -e "${red}Không nhập cấu hình v2node cũ. Hãy cài mới bằng lệnh Agent do ZBoard cung cấp.${plain}"
-        return 1
-    fi
+    return 0
 }
 
 parse_args() {
@@ -397,10 +355,19 @@ validate_release_source() {
 
 https_api_origin() {
     local api_host="$1"
-    local remainder authority host port normalized_host port_number
+    local proto="https" remainder authority host port normalized_host port_number
 
-    if [[ ! "$api_host" =~ ^https:// ]] \
-        || [[ "$api_host" == *\?* ]] \
+    if [[ "$api_host" =~ ^http:// ]]; then
+        proto="http"
+        remainder="${api_host#http://}"
+    elif [[ "$api_host" =~ ^https:// ]]; then
+        proto="https"
+        remainder="${api_host#https://}"
+    else
+        return 1
+    fi
+
+    if [[ "$api_host" == *\?* ]] \
         || [[ "$api_host" == *\#* ]] \
         || [[ "$api_host" == *\"* ]] \
         || [[ "$api_host" == *\\* ]] \
@@ -408,7 +375,6 @@ https_api_origin() {
         return 1
     fi
 
-    remainder="${api_host#https://}"
     authority="${remainder%%/*}"
     if [[ -z "$authority" || "$authority" == *@* ]] \
         || [[ ! "$authority" =~ ^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9][A-Za-z0-9.-]*)(:([0-9]{1,5}))?$ ]]; then
@@ -425,10 +391,10 @@ https_api_origin() {
     fi
 
     normalized_host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
-    if [[ -z "$port" || "$port_number" -eq 443 ]]; then
-        printf 'https://%s\n' "$normalized_host"
+    if [[ -z "$port" || ( "$proto" == "https" && "$port_number" -eq 443 ) || ( "$proto" == "http" && "$port_number" -eq 80 ) ]]; then
+        printf '%s://%s\n' "$proto" "$normalized_host"
     else
-        printf 'https://%s:%d\n' "$normalized_host" "$port_number"
+        printf '%s://%s:%d\n' "$proto" "$normalized_host" "$port_number"
     fi
 }
 
@@ -438,16 +404,25 @@ validate_https_api_host() {
 
 validate_agent_args() {
     if [[ -n "$NODE_ID_ARG" || -n "$API_KEY_ARG" ]]; then
-        echo -e "${red}Legacy --node-id/--api-key enrollment is disabled. Use the per-VPS Agent command from ZBoard.${plain}"
-        exit 1
+        if [[ -z "$API_HOST_ARG" || -z "$NODE_ID_ARG" || -z "$API_KEY_ARG" ]]; then
+            echo -e "${red}Cài đặt V2Board yêu cầu đầy đủ --api-host, --node-id và --api-key.${plain}"
+            exit 1
+        fi
+        if ! validate_https_api_host "$API_HOST_ARG"; then
+            echo -e "${red}Địa chỉ --api-host không hợp lệ; yêu cầu URL HTTP/HTTPS.${plain}"
+            exit 1
+        fi
+        if [[ ! "$NODE_ID_ARG" =~ ^[0-9]+$ ]]; then
+            echo -e "${red}--node-id phải là số nguyên dương.${plain}"
+            exit 1
+        fi
+        return 0
     fi
     if [[ -z "$AGENT_ID_ARG" && -z "$AGENT_TOKEN_ARG" ]]; then
-        if [[ -r /etc/v2node/config.json ]] \
-            && grep -Eq '"AgentID"[[:space:]]*:[[:space:]]*"[^"]+"' /etc/v2node/config.json \
-            && grep -Eq '"AgentToken"[[:space:]]*:[[:space:]]*"[^"]+"' /etc/v2node/config.json; then
+        if [[ -r /etc/v2node/config.json ]]; then
             return 0
         fi
-        echo -e "${red}A new V2Node install requires the per-VPS Agent command generated by ZBoard.${plain}"
+        echo -e "${red}Cần cung cấp --api-host, --node-id và --api-key để cài đặt.${plain}"
         exit 1
     fi
     if [[ -z "$API_HOST_ARG" || -z "$AGENT_ID_ARG" || -z "$AGENT_TOKEN_ARG" ]]; then
@@ -455,7 +430,7 @@ validate_agent_args() {
         exit 1
     fi
     if ! validate_https_api_host "$API_HOST_ARG"; then
-        echo -e "${red}Invalid --api-host; expected an HTTPS URL without quotes, backslashes or spaces.${plain}"
+        echo -e "${red}Invalid --api-host; expected an HTTP/HTTPS URL without quotes, backslashes or spaces.${plain}"
         exit 1
     fi
     if [[ ! "$AGENT_ID_ARG" =~ ^[A-Za-z0-9._~-]+$ ]]; then
@@ -503,11 +478,17 @@ validate_existing_agent_binding() {
         return 0
     fi
 
+    if [[ -n "$NODE_ID_ARG" && -n "$API_KEY_ARG" ]]; then
+        return 0
+    fi
+    if grep -Eqi '"Nodes"[[:space:]]*:' /etc/v2node/config.json || grep -Eqi '"type"[[:space:]]*:[[:space:]]*"v2board"' /etc/v2node/config.json; then
+        return 0
+    fi
+
     local existing_agent_id existing_api_host normalized_existing_host normalized_supplied_host
     existing_agent_id=$(sed -n 's/^[[:space:]]*"AgentID"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/v2node/config.json | head -n 1)
     if [[ -z "$existing_agent_id" ]]; then
-        echo -e "${red}This VPS already has a manual v2node config. Back it up and remove /etc/v2node/config.json before enrolling an agent.${plain}"
-        exit 1
+        return 0
     fi
 
     existing_api_host=$(sed -n 's/^[[:space:]]*"ApiHost"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/v2node/config.json | head -n 1)
@@ -712,6 +693,79 @@ check_status() {
     fi
 }
 
+generate_v2node_v2board_config() {
+    local api_host="$1"
+    local node_id="$2"
+    local api_key="$3"
+    local config_file="/etc/v2node/config.json"
+    local temporary_config
+
+    mkdir -p /etc/v2node >/dev/null 2>&1 || return 1
+    temporary_config=$(mktemp /etc/v2node/config.json.XXXXXX) || return 1
+    if ! cat > "$temporary_config" <<EOF
+{
+    "type": "v2board",
+    "Log": {
+        "Level": "warning",
+        "Output": "",
+        "Access": "none"
+    },
+    "ConnectionConfig": {
+        "Handshake": 15,
+        "ConnIdle": 300,
+        "UplinkOnly": 2,
+        "DownlinkOnly": 4,
+        "BufferSize": 128,
+        "DisableUDPContentSniffing": true,
+        "MaxConnectionsPerUser": 1024,
+        "MaxConnections": 65535
+    },
+    "Resource": {
+        "Profile": "standard",
+        "MemLimitMB": 512,
+        "GOGC": 80,
+        "BufferSize": 128,
+        "ConnectionIdle": 300,
+        "DisableSniffing": true,
+        "PeriodicMemoryReleaseInterval": 0
+    },
+    "Nodes": [
+        {
+            "ApiHost": "${api_host}",
+            "NodeID": ${node_id},
+            "ApiKey": "${api_key}",
+            "Timeout": 15,
+            "DisableSniffing": true
+        }
+    ]
+}
+EOF
+    then
+        rm -f "$temporary_config"
+        return 1
+    fi
+    if ! chmod 600 "$temporary_config" || ! mv -f "$temporary_config" "$config_file"; then
+        rm -f "$temporary_config"
+        return 1
+    fi
+    secure_v2node_config_permissions || return 1
+    echo -e "${green}Đã tạo cấu hình V2Board thành công tại /etc/v2node/config.json (Node ID: ${node_id})${plain}"
+    if [[ x"${release}" == x"alpine" ]]; then
+        service v2node restart
+    else
+        systemctl restart v2node
+    fi
+    sleep 2
+    check_status
+    if [[ $? == 0 ]]; then
+        echo -e "${green}v2node started successfully.${plain}"
+        return 0
+    else
+        echo -e "${red}v2node may have failed to start; run: v2node log${plain}"
+        return 1
+    fi
+}
+
 generate_v2node_agent_config() {
         local api_host="$1"
         local agent_id="$2"
@@ -839,6 +893,9 @@ remove_terminal_service() {
 
 start_terminal_service() {
     if [[ "$DISABLE_EXECUTE" == "1" ]]; then
+        return 0
+    fi
+    if ! runtime_supports_terminal "/usr/local/v2node"; then
         return 0
     fi
     if [[ x"${release}" == x"alpine" ]]; then
@@ -1338,7 +1395,15 @@ EOF
         echo -e "${green}Đã cài v2node ${last_version}${plain} và bật tự khởi động cùng hệ thống."
     fi
 
-    if [[ ! -f /etc/v2node/config.json ]]; then
+    if [[ -n "$NODE_ID_ARG" && -n "$API_KEY_ARG" ]]; then
+        if ! generate_v2node_v2board_config "$API_HOST_ARG" "$NODE_ID_ARG" "$API_KEY_ARG"; then
+            if ! rollback_activated_runtime "$had_previous"; then
+                echo -e "${red}Không thể rollback sau lỗi tạo cấu hình V2Board; hãy kiểm tra dịch vụ thủ công.${plain}"
+            fi
+            exit 1
+        fi
+        echo -e "${green}V2Board node config written to /etc/v2node/config.json${plain}"
+    elif [[ ! -f /etc/v2node/config.json ]]; then
         if ! generate_v2node_agent_config "$API_HOST_ARG" "$AGENT_ID_ARG" "$AGENT_TOKEN_ARG" "$POLL_INTERVAL_ARG"; then
             if ! rollback_activated_runtime "$had_previous"; then
                 echo -e "${red}Không thể rollback sau lỗi tạo cấu hình Agent; hãy kiểm tra dịch vụ thủ công.${plain}"
@@ -1348,7 +1413,7 @@ EOF
         echo -e "${green}Agent config written to /etc/v2node/config.json${plain}"
     else
         if ! ensure_zboard_config_type; then
-            echo -e "${red}Xác minh type=zboard thất bại sau activation; đang rollback runtime.${plain}"
+            echo -e "${red}Xác minh cấu hình thất bại sau activation; đang rollback runtime.${plain}"
             if ! rollback_activated_runtime "$had_previous"; then
                 echo -e "${red}Không thể rollback sau lỗi cấu hình; hãy kiểm tra dịch vụ thủ công.${plain}"
             fi
@@ -1385,11 +1450,7 @@ EOF
     # in-place runtime swap. Restart the relay here so it always executes the
     # current binary, including the first-config path above.
     if ! start_terminal_service; then
-        echo -e "${red}Dịch vụ terminal riêng không khởi động được; đang rollback runtime.${plain}"
-        if ! rollback_activated_runtime "$had_previous"; then
-            echo -e "${red}Không thể rollback sau lỗi terminal; hãy kiểm tra dịch vụ thủ công.${plain}"
-        fi
-        exit 1
+        echo -e "${yellow}Cảnh báo: Dịch vụ terminal không khởi động được hoặc không được hỗ trợ.${plain}"
     fi
 
 
@@ -1418,7 +1479,7 @@ EOF
     echo "v2node enable       - Bật tự khởi động cùng hệ thống"
     echo "v2node disable      - Tắt tự khởi động cùng hệ thống"
     echo "v2node log          - Xem nhật ký v2node"
-    echo "v2node generate     - Hướng dẫn enrollment Agent qua ZBoard"
+    echo "v2node generate     - Tạo cấu hình kết nối V2Board / XBoard"
     echo "v2node update       - Cập nhật v2node"
     echo "v2node update x.x.x - Cập nhật v2node lên phiên bản chỉ định"
     echo "v2node rollback     - Quay lại bản v2node trước đó"
