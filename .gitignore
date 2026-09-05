@@ -22,3 +22,5 @@ v2node_*
 *.log
 bin/
 dist/
+dist_release/
+*.dat
