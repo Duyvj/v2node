@@ -311,6 +311,7 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	node.PushInterval = intervalToTime(cm.BaseConfig.PushInterval)
 	node.PullInterval = intervalToTime(cm.BaseConfig.PullInterval)
 
+	node.DisableSniffing = true
 	if cm.DisableSniffing || (cm.BaseConfig != nil && cm.BaseConfig.DisableSniffing) {
 		node.DisableSniffing = true
 	}

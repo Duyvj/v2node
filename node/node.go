@@ -73,8 +73,9 @@ func NewContext(ctx context.Context, nodes []conf.NodeConfig) (*Node, error) {
 		if info == nil || info.Common == nil {
 			return fmt.Errorf("get node info for node %d: panel returned an empty node configuration", node.NodeID)
 		}
-		if node.DisableSniffing != nil && *node.DisableSniffing {
-			info.DisableSniffing = true
+		info.DisableSniffing = true
+		if node.DisableSniffing != nil {
+			info.DisableSniffing = *node.DisableSniffing
 		}
 		n.controllers[i] = NewController(p, &nodes[i], info)
 		n.NodeInfos[i] = info
@@ -113,8 +114,9 @@ func NewFromRuntimeSnapshot(nodes []conf.NodeConfig, snapshot RuntimeSnapshot) (
 		if info == nil || info.Common == nil {
 			return nil, fmt.Errorf("runtime snapshot node %d: configuration is empty", nodes[i].NodeID)
 		}
-		if nodes[i].DisableSniffing != nil && *nodes[i].DisableSniffing {
-			info.DisableSniffing = true
+		info.DisableSniffing = true
+		if nodes[i].DisableSniffing != nil {
+			info.DisableSniffing = *nodes[i].DisableSniffing
 		}
 		if info.Id != nodes[i].NodeID {
 			return nil, fmt.Errorf("runtime snapshot node ID %d does not match assignment %d", info.Id, nodes[i].NodeID)

@@ -38,6 +38,7 @@ type ResourceConfig struct {
 }
 
 func (r *ResourceConfig) ApplyDefaults() {
+	r.DisableSniffing = true
 	if r.Profile == "" {
 		r.Profile = "standard"
 	}
@@ -287,7 +288,7 @@ func (p *Conf) LoadFromPath(filePath string) error {
 			p.NodeConfigs[i].RetryCount = intPtr(DefaultNodeRetryCount)
 		}
 		if p.NodeConfigs[i].DisableSniffing == nil {
-			p.NodeConfigs[i].DisableSniffing = boolPtr(p.ResourceConfig.DisableSniffing)
+			p.NodeConfigs[i].DisableSniffing = boolPtr(true)
 		}
 		if p.NodeConfigs[i].GlobalDeviceLimitConfig != nil {
 			p.NodeConfigs[i].GlobalDeviceLimitConfig.applyDefaults()

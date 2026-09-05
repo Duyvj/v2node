@@ -24,6 +24,7 @@ import (
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/dns"
+	"github.com/xtls/xray-core/features/extension"
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/features/routing"
@@ -179,6 +180,9 @@ func init() {
 		if err := core.RequireFeatures(ctx, func(om outbound.Manager, router routing.Router, pm policy.Manager, sm stats.Manager, dc dns.Client) error {
 			core.OptionalFeatures(ctx, func(fdns dns.FakeDNSEngine) {
 				d.fdns = fdns
+			})
+			core.OptionalFeatures(ctx, func(obs extension.Observatory) {
+				globalStickyBalancer.SetObservatory(ctx, obs)
 			})
 			return d.Init(config.(*Config), om, router, pm, sm)
 		}); err != nil {
@@ -803,12 +807,27 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	} else if d.router != nil {
 		if route, err := d.router.PickRoute(routingLink); err == nil {
 			outTag := route.GetOutboundTag()
+			ruleTag := route.GetRuleTag()
+			if ruleTag == "default_balancer" || outTag == "default_balancer" {
+				sessionInbound := session.InboundFromContext(ctx)
+				sessionKey := ""
+				if sessionInbound != nil {
+					if sessionInbound.User != nil && sessionInbound.User.Email != "" {
+						sessionKey = sessionInbound.User.Email
+					} else if sessionInbound.Source.IsValid() {
+						sessionKey = sessionInbound.Source.Address.String()
+					}
+				}
+				if stickyTag := globalStickyBalancer.PickOutbound(sessionKey); stickyTag != "" {
+					outTag = stickyTag
+				}
+			}
 			if h := d.ohm.GetHandler(outTag); h != nil {
 				isPickRoute = 2
-				if route.GetRuleTag() == "" {
+				if ruleTag == "" {
 					errors.LogInfo(ctx, "taking detour [", outTag, "] for [", destination, "]")
 				} else {
-					errors.LogInfo(ctx, "Hit route rule: [", route.GetRuleTag(), "] so taking detour [", outTag, "] for [", destination, "]")
+					errors.LogInfo(ctx, "Hit route rule: [", ruleTag, "] so taking detour [", outTag, "] for [", destination, "]")
 				}
 				handler = h
 			} else {

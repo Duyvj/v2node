@@ -179,7 +179,7 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	in.ListenOn = &coreConf.Address{Address: ipAddress}
 	// Set SniffingConfig
 	sniffingConfig := &coreConf.SniffingConfig{
-		Enabled:      needsInboundSniffing(nodeInfo),
+		Enabled:      !nodeInfo.DisableSniffing && needsInboundSniffing(nodeInfo),
 		DestOverride: coreConf.StringList{"http", "tls", "quic"},
 		RouteOnly:    true,
 	}

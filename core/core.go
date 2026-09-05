@@ -118,10 +118,11 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
 		ErrorLog:  c.LogConfig.Output,
 	}
 	// Custom config
-	dnsConfig, outBoundConfig, routeConfig, err := GetCustomConfig(infos)
+	dnsConfig, outBoundConfig, routeConfig, obsConfig, defaultTags, err := GetCustomConfig(infos)
 	if err != nil {
 		return nil, fmt.Errorf("build custom config: %w", err)
 	}
+	dispatcher.ConfigureStickyBalancer(defaultTags)
 	// Inbound config
 	var inBoundConfig []*core.InboundHandlerConfig
 
@@ -139,17 +140,21 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
 	corePolicyConfig.Levels = map[uint32]*coreConf.Policy{0: levelPolicyConfig}
 	policyConfig, _ := corePolicyConfig.Build()
 	// Build Xray conf
+	apps := []*serial.TypedMessage{
+		serial.ToTypedMessage(coreLogConfig.Build()),
+		serial.ToTypedMessage(&dispatcher.Config{}),
+		serial.ToTypedMessage(&stats.Config{}),
+		serial.ToTypedMessage(&proxyman.InboundConfig{}),
+		serial.ToTypedMessage(&proxyman.OutboundConfig{}),
+		serial.ToTypedMessage(policyConfig),
+		serial.ToTypedMessage(dnsConfig),
+		serial.ToTypedMessage(routeConfig),
+	}
+	if obsConfig != nil {
+		apps = append(apps, serial.ToTypedMessage(obsConfig))
+	}
 	config := &core.Config{
-		App: []*serial.TypedMessage{
-			serial.ToTypedMessage(coreLogConfig.Build()),
-			serial.ToTypedMessage(&dispatcher.Config{}),
-			serial.ToTypedMessage(&stats.Config{}),
-			serial.ToTypedMessage(&proxyman.InboundConfig{}),
-			serial.ToTypedMessage(&proxyman.OutboundConfig{}),
-			serial.ToTypedMessage(policyConfig),
-			serial.ToTypedMessage(dnsConfig),
-			serial.ToTypedMessage(routeConfig),
-		},
+		App:      apps,
 		Inbound:  inBoundConfig,
 		Outbound: outBoundConfig,
 	}
