@@ -111,18 +111,23 @@ func hardenWireGuardOutbound(outbound *conf.OutboundDetourConfig) error {
 	if err := json.Unmarshal(*outbound.Settings, &raw); err != nil {
 		return fmt.Errorf("decode wireguard settings: %w", err)
 	}
+	if raw == nil {
+		return fmt.Errorf("wireguard settings must be an object")
+	}
 	// Force userspace gVisor netstack (noKernelTun: true) so multiple concurrent
 	// WireGuard tunnels can coexist cleanly without Linux kernel TUN collisions,
 	// routing table clashes, or shared 10.2.0.2/32 interface conflicts (e.g. Proton VPN).
 	raw["noKernelTun"] = true
 
-	// If remote DNS is not explicitly configured, provide working fallbacks
-	// (including Proton VPN's internal gateway DNS 10.2.0.1) so domain lookups do not stall.
-	if _, hasDNS := raw["remoteDNS"]; !hasDNS {
-		if _, hasOldDNS := raw["dns"]; !hasOldDNS {
-			raw["remoteDNS"] = []string{"10.2.0.1", "1.1.1.1", "1.0.0.1"}
+	// Do not inject a provider-specific DNS server. Xray uses its generic,
+	// reachable defaults when remoteDNS is omitted, while an explicitly supplied
+	// remoteDNS remains authoritative for providers such as Proton VPN.
+	if _, explicit := raw["remoteDNS"]; !explicit {
+		if legacy, exists := raw["dns"]; exists {
+			raw["remoteDNS"] = legacy
 		}
 	}
+	delete(raw, "dns")
 
 	encoded, err := json.Marshal(raw)
 	if err != nil {

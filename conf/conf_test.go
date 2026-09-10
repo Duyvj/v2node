@@ -1,10 +1,36 @@
 package conf
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestResourceProfilesApplyOnlyToOmittedConnectionFields(t *testing.T) {
+	for _, tc := range []struct {
+		profile string
+		buffer  int32
+		idle    uint32
+	}{
+		{"low", 64, 300}, {"standard", 128, 300}, {"high", 256, 600},
+	} {
+		t.Run(tc.profile, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			data := fmt.Sprintf(`{"Resource":{"Profile":%q},"ConnectionConfig":{"Handshake":20},"Nodes":[{"ApiHost":"https://panel.example","NodeID":1,"ApiKey":"dummy"}]}`, tc.profile)
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			c := New()
+			if err := c.LoadFromPath(path); err != nil {
+				t.Fatal(err)
+			}
+			if c.ConnectionConfig.BufferSize != tc.buffer || c.ConnectionConfig.ConnIdle != tc.idle || c.ConnectionConfig.Handshake != 20 {
+				t.Fatalf("wrong precedence/profile values: %+v", c.ConnectionConfig)
+			}
+		})
+	}
+}
 
 func TestLoadDefaultsAndRedisConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
@@ -52,6 +78,31 @@ func TestLoadDefaultsAndRedisConfig(t *testing.T) {
 	custom.applyDefaults()
 	if custom.UserSourceMode != "redis_primary" {
 		t.Fatalf("redis primary source was not normalized: %q", custom.UserSourceMode)
+	}
+}
+
+func TestExplicitConnectionConfigOverridesResourceDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{
+  "Resource": {"Profile": "high"},
+  "ConnectionConfig": {
+    "Handshake": 20,
+    "ConnIdle": 900,
+    "UplinkOnly": 11,
+    "DownlinkOnly": 12,
+    "BufferSize": 64
+  },
+  "Nodes": [{"ApiHost": "https://panel.example", "NodeID": 7, "ApiKey": "test-key"}]
+}`)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := New()
+	if err := c.LoadFromPath(path); err != nil {
+		t.Fatal(err)
+	}
+	if c.ConnectionConfig.Handshake != 20 || c.ConnectionConfig.ConnIdle != 900 || c.ConnectionConfig.UplinkOnly != 11 || c.ConnectionConfig.DownlinkOnly != 12 || c.ConnectionConfig.BufferSize != 64 {
+		t.Fatalf("explicit ConnectionConfig was overwritten: %+v", c.ConnectionConfig)
 	}
 }
 
@@ -207,9 +258,9 @@ func TestOriginalV2NodeConfigLoadsSuccessfully(t *testing.T) {
     },
     "Nodes": [
         {
-            "ApiHost": "https://ezviet.xyz",
+            "ApiHost": "https://panel.example",
             "NodeID": 81,
-            "ApiKey": "ezvietezvietezvietttr56a",
+            "ApiKey": "test-api-key",
             "Timeout": 15
         }
     ]

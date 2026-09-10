@@ -2,10 +2,34 @@ package core
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	coreConf "github.com/xtls/xray-core/infra/conf"
 )
+
+func TestWireGuardPreservesExplicitAndLegacyDNS(t *testing.T) {
+	for _, raw := range []string{
+		`{"remoteDNS":["10.8.0.1","1.1.1.1"]}`,
+		`{"dns":["10.8.0.1","1.1.1.1"]}`,
+		`{"remoteDNS":["10.8.0.1","1.1.1.1"],"dns":["10.2.0.1"]}`,
+	} {
+		settings := json.RawMessage(raw)
+		out := &coreConf.OutboundDetourConfig{Protocol: "wireguard", Settings: &settings}
+		if err := hardenWireGuardOutbound(out); err != nil {
+			t.Fatal(err)
+		}
+		var parsed struct {
+			DNS []string `json:"remoteDNS"`
+		}
+		if err := json.Unmarshal(*out.Settings, &parsed); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(parsed.DNS, []string{"10.8.0.1", "1.1.1.1"}) {
+			t.Fatalf("explicit DNS changed: %v", parsed.DNS)
+		}
+	}
+}
 
 func TestWireGuardOutboundIsRegistered(t *testing.T) {
 	raw := []byte(`{
@@ -37,14 +61,14 @@ func TestWireGuardOutboundIsRegistered(t *testing.T) {
 
 func TestHardenWireGuardOutboundSetsNoKernelTun(t *testing.T) {
 	raw := []byte(`{
-		"tag":"wg_proton",
+		"tag":"wg_test",
 		"protocol":"wireguard",
 		"settings":{
-			"secretKey":"COYrxmQRV27b/5XUMrhxa70XhkT5JFakYqLARDNkSW4=",
-			"address":["10.2.0.2/32"],
+			"secretKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			"address":["10.8.0.2/32"],
 			"peers":[{
-				"endpoint":"188.214.152.226:51820",
-				"publicKey":"NfKOMtk2fuDycbQXv36yk5mfdgDA8/8SN6amCdFrKxQ=",
+				"endpoint":"192.0.2.10:51820",
+				"publicKey":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
 				"allowedIPs":["0.0.0.0/0"],
 				"keepAlive":25
 			}],
@@ -65,8 +89,8 @@ func TestHardenWireGuardOutboundSetsNoKernelTun(t *testing.T) {
 	if noTun, ok := settings["noKernelTun"].(bool); !ok || !noTun {
 		t.Fatalf("expected noKernelTun=true, got: %v", settings["noKernelTun"])
 	}
-	if dns, ok := settings["remoteDNS"].([]interface{}); !ok || len(dns) == 0 {
-		t.Fatalf("expected remoteDNS fallback, got: %v", settings["remoteDNS"])
+	if _, exists := settings["remoteDNS"]; exists {
+		t.Fatalf("expected Xray's generic DNS defaults, got forced remoteDNS: %v", settings["remoteDNS"])
 	}
 	// Verify it still builds cleanly into an Xray OutboundHandlerConfig
 	if _, err := config.Build(); err != nil {

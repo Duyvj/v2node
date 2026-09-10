@@ -16,8 +16,19 @@ permissions:
   contents: write
 
 jobs:
-
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GOEXPERIMENT: jsonv2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Test routing, protocols and credential fixtures
+        run: go test -race -count=1 -timeout=180s ./...
   build:
+    needs: test
     strategy:
       matrix:
         # Include amd64 on all platforms.
@@ -130,7 +141,9 @@ jobs:
           mv v2node v2node.exe
       - name: Prepare to release
         run: |
-          cp ${GITHUB_WORKSPACE}/README.md ./build_assets/README.md
+          if [[ -f "${GITHUB_WORKSPACE}/README.md" ]]; then
+            cp "${GITHUB_WORKSPACE}/README.md" ./build_assets/README.md
+          fi
           cp ${GITHUB_WORKSPACE}/LICENSE ./build_assets/LICENSE
           LIST=('geoip' 'geosite')
           for i in "${LIST[@]}"
@@ -138,7 +151,7 @@ jobs:
             DOWNLOAD_URL="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/${i}.dat"
             FILE_NAME="${i}.dat"
             echo -e "Downloading ${DOWNLOAD_URL}..."
-            curl -L "${DOWNLOAD_URL}" -o ./build_assets/${FILE_NAME}
+            curl --fail --location --retry 3 "${DOWNLOAD_URL}" -o ./build_assets/${FILE_NAME}
           done
       - name: Create ZIP archive
         shell: bash
@@ -168,6 +181,21 @@ jobs:
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: ./v2node-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
+          tag: ${{ github.ref_name }}
+          file_glob: true
+          overwrite: true
+
+  release_scripts:
+    needs: test
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload matching installer and manager
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./script/*.sh
           tag: ${{ github.ref_name }}
           file_glob: true
           overwrite: true

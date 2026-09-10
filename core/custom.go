@@ -1,6 +1,7 @@
 package core
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -23,6 +24,20 @@ func hasOutboundWithTag(list []*core.OutboundHandlerConfig, tag string) bool {
 		}
 	}
 	return false
+}
+
+func defaultBalancerTag(inboundTag string) string {
+	digest := sha256.Sum256([]byte(inboundTag))
+	return fmt.Sprintf("default_balancer_%x", digest[:])
+}
+
+func appendUniqueTag(tags []string, tag string) []string {
+	for _, existing := range tags {
+		if existing == tag {
+			return tags
+		}
+	}
+	return append(tags, tag)
 }
 
 func resolveRouteOutbounds(value *string, existing []*core.OutboundHandlerConfig) ([]string, []*core.OutboundHandlerConfig, error) {
@@ -48,7 +63,7 @@ func resolveRouteOutbounds(value *string, existing []*core.OutboundHandlerConfig
 
 	for _, outbound := range outbounds {
 		if outbound == nil {
-			continue
+			return nil, nil, fmt.Errorf("route outbound must not contain null")
 		}
 		if strings.TrimSpace(outbound.Tag) == "" {
 			return nil, nil, fmt.Errorf("route outbound tag is missing")
@@ -62,17 +77,31 @@ func resolveRouteOutbounds(value *string, existing []*core.OutboundHandlerConfig
 		if err := applyXHTTPStreamDefaults(outbound.StreamSetting); err != nil {
 			return nil, nil, fmt.Errorf("apply xhttp outbound defaults: %w", err)
 		}
-		tags = append(tags, outbound.Tag)
-		if hasOutboundWithTag(existing, outbound.Tag) || hasOutboundWithTag(builtList, outbound.Tag) {
-			continue
-		}
 		built, err := outbound.Build()
 		if err != nil {
 			return nil, nil, fmt.Errorf("build route outbound %q: %w", outbound.Tag, err)
 		}
+		duplicate := false
+		for _, list := range [][]*core.OutboundHandlerConfig{existing, builtList} {
+			for _, previous := range list {
+				if previous != nil && previous.Tag == built.Tag {
+					if !proto.Equal(previous, built) {
+						return nil, nil, fmt.Errorf("outbound tag %q has conflicting configurations; use distinct tags", built.Tag)
+					}
+					duplicate = true
+				}
+			}
+		}
+		tags = appendUniqueTag(tags, built.Tag)
+		if duplicate {
+			continue
+		}
 		builtList = append(builtList, built)
 	}
 
+	if len(tags) == 0 {
+		return nil, nil, fmt.Errorf("route outbound must include at least one outbound")
+	}
 	return tags, builtList, nil
 }
 
@@ -81,8 +110,8 @@ func resolveRouteOutbound(value *string, existing []*core.OutboundHandlerConfig)
 	if err != nil {
 		return "", nil, err
 	}
-	if len(tags) == 0 {
-		return "", nil, fmt.Errorf("route outbound is missing")
+	if len(tags) != 1 {
+		return "", nil, fmt.Errorf("domain/IP route requires exactly one outbound; use default_out for a pool")
 	}
 	var b *core.OutboundHandlerConfig
 	if len(built) > 0 {
@@ -91,7 +120,7 @@ func resolveRouteOutbound(value *string, existing []*core.OutboundHandlerConfig)
 	return tags[0], b, nil
 }
 
-func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, proto.Message, []string, error) {
+func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, proto.Message, map[string][]string, error) {
 	// Prefer the stable IPv4 egress used by the panel's advertised VPS
 	// address. Merely having a public IPv6 address on an interface does not
 	// prove that the VPS has a working IPv6 route; broken/black-holed IPv6 is a
@@ -136,8 +165,13 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 		DomainStrategy: &domainStrategy,
 	}
 
+	defaultOutboundGroups := make(map[string][]string)
+	seenInboundTags := make(map[string]bool)
 	var defaultOutboundTags []string
-	nodeHasDefaultOut := make(map[string]bool)
+	var defaultOutboundInbounds []struct {
+		inboundTag  string
+		balancerTag string
+	}
 
 	for _, info := range infos {
 		if info == nil || info.Common == nil {
@@ -146,6 +180,14 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 		if len(info.Common.Routes) == 0 {
 			continue
 		}
+		if strings.TrimSpace(info.Tag) == "" {
+			return nil, nil, nil, nil, nil, fmt.Errorf("node %d has an empty inbound tag", info.Id)
+		}
+		if seenInboundTags[info.Tag] {
+			return nil, nil, nil, nil, nil, fmt.Errorf("duplicate inbound tag %q", info.Tag)
+		}
+		seenInboundTags[info.Tag] = true
+		balancerTag := ""
 		for _, route := range info.Common.Routes {
 			switch route.Action {
 			case "dns":
@@ -247,24 +289,24 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				if err != nil {
 					return nil, nil, nil, nil, nil, fmt.Errorf("node %d route %d: %w", info.Id, route.Id, err)
 				}
+				if balancerTag == "" {
+					balancerTag = defaultBalancerTag(info.Tag)
+					defaultOutboundInbounds = append(defaultOutboundInbounds, struct {
+						inboundTag  string
+						balancerTag string
+					}{inboundTag: info.Tag, balancerTag: balancerTag})
+				}
 				for _, b := range customOutbounds {
 					if b != nil && !hasOutboundWithTag(coreOutboundConfig, b.Tag) {
 						coreOutboundConfig = append(coreOutboundConfig, b)
 					}
 				}
 				for _, tag := range tags {
-					found := false
-					for _, existingTag := range defaultOutboundTags {
-						if existingTag == tag {
-							found = true
-							break
-						}
-					}
-					if !found {
-						defaultOutboundTags = append(defaultOutboundTags, tag)
-					}
+					// Identical shared outbounds may appear in several groups; only
+					// the group's own candidate list is eligible for sticky routing.
+					defaultOutboundGroups[balancerTag] = appendUniqueTag(defaultOutboundGroups[balancerTag], tag)
+					defaultOutboundTags = appendUniqueTag(defaultOutboundTags, tag)
 				}
-				nodeHasDefaultOut[info.Tag] = true
 			default:
 				return nil, nil, nil, nil, nil, fmt.Errorf("node %d route %d: unsupported action %q", info.Id, route.Id, route.Action)
 			}
@@ -272,31 +314,30 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 	}
 
 	var obsConfig proto.Message
-	if len(defaultOutboundTags) > 0 {
-		// 1. Add BalancingRule in RouterConfig
-		coreRouterConfig.Balancers = append(coreRouterConfig.Balancers, &coreConf.BalancingRule{
-			Tag:         "default_balancer",
-			Selectors:   coreConf.StringList(defaultOutboundTags),
-			Strategy:    coreConf.StrategyConfig{Type: "roundrobin"},
-			FallbackTag: defaultOutboundTags[0],
-		})
-
-		// 2. Add balancer routing rule for each inbound tag that has default_out
-		for inTag := range nodeHasDefaultOut {
-			rule := map[string]interface{}{
-				"inboundTag":  inTag,
-				"network":     "tcp,udp",
-				"balancerTag": "default_balancer",
-				"ruleTag":     "default_balancer",
-			}
-			rawRule, err := json.Marshal(rule)
-			if err != nil {
-				return nil, nil, nil, nil, nil, fmt.Errorf("marshal default balancer route for %s: %w", inTag, err)
-			}
-			coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+	for _, group := range defaultOutboundInbounds {
+		selectors := defaultOutboundGroups[group.balancerTag]
+		if len(selectors) == 0 {
+			return nil, nil, nil, nil, nil, fmt.Errorf("inbound %q has no default outbound", group.inboundTag)
 		}
-
-		// 3. Configure Observatory for Health Check
+		coreRouterConfig.Balancers = append(coreRouterConfig.Balancers, &coreConf.BalancingRule{
+			Tag:         group.balancerTag,
+			Selectors:   coreConf.StringList(selectors),
+			Strategy:    coreConf.StrategyConfig{Type: "roundrobin"},
+			FallbackTag: selectors[0],
+		})
+		rule := map[string]interface{}{
+			"inboundTag":  group.inboundTag,
+			"network":     "tcp,udp",
+			"balancerTag": group.balancerTag,
+			"ruleTag":     group.balancerTag,
+		}
+		rawRule, err := json.Marshal(rule)
+		if err != nil {
+			return nil, nil, nil, nil, nil, fmt.Errorf("marshal default balancer route for %s: %w", group.inboundTag, err)
+		}
+		coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+	}
+	if len(defaultOutboundTags) > 0 {
 		obsConfig = &observatory.Config{
 			SubjectSelector:   defaultOutboundTags,
 			ProbeUrl:          "http://cp.cloudflare.com/generate_204",
@@ -313,5 +354,5 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
-	return DnsConfig, coreOutboundConfig, RouterConfig, obsConfig, defaultOutboundTags, nil
+	return DnsConfig, coreOutboundConfig, RouterConfig, obsConfig, defaultOutboundGroups, nil
 }

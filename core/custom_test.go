@@ -110,11 +110,11 @@ func TestMultipleDefaultOutboundsCreateBalancerAndObservatory(t *testing.T) {
 		"tag": "38454722",
 		"protocol": "wireguard",
 		"settings": {
-			"secretKey": "COYrxmQRV27b/5XUMrhxa70XhkT5JFAkYqLARDNKSW4=",
+			"secretKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 			"address": ["10.2.0.2/32"],
 			"peers": [{
-				"publicKey": "NfKOMtk2fuDycbQXv36yk5mfdgDA8/8SN6amCdFrKxQ=",
-				"endpoint": "188.214.152.226:51820",
+				"publicKey": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+				"endpoint": "192.0.2.10:51820",
 				"allowedIPs": ["0.0.0.0/0"],
 				"keepAlive": 25
 			}],
@@ -125,11 +125,11 @@ func TestMultipleDefaultOutboundsCreateBalancerAndObservatory(t *testing.T) {
 		"tag": "38454723",
 		"protocol": "wireguard",
 		"settings": {
-			"secretKey": "COYrxmQRV27b/5XUMrhxa70XhkT5JFAkYqLARDNKSW4=",
+			"secretKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 			"address": ["10.2.0.3/32"],
 			"peers": [{
-				"publicKey": "NfKOMtk2fuDycbQXv36yk5mfdgDA8/8SN6amCdFrKxQ=",
-				"endpoint": "188.214.152.227:51820",
+				"publicKey": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+				"endpoint": "192.0.2.11:51820",
 				"allowedIPs": ["0.0.0.0/0"],
 				"keepAlive": 25
 			}],
@@ -146,15 +146,17 @@ func TestMultipleDefaultOutboundsCreateBalancerAndObservatory(t *testing.T) {
 		},
 	}}
 
-	dnsConfig, outbounds, routerConfig, obsConfig, defaultTags, err := GetCustomConfig(infos)
+	dnsConfig, outbounds, routerConfig, obsConfig, defaultGroups, err := GetCustomConfig(infos)
 	if err != nil {
 		t.Fatalf("GetCustomConfig failed: %v", err)
 	}
 	if dnsConfig == nil {
 		t.Fatal("dnsConfig is nil")
 	}
-	if len(defaultTags) != 2 {
-		t.Fatalf("expected 2 defaultTags, got: %v", defaultTags)
+	balancerTag := defaultBalancerTag("node1")
+	defaultTags := defaultGroups[balancerTag]
+	if len(defaultGroups) != 1 || len(defaultTags) != 2 {
+		t.Fatalf("expected one group with 2 default tags, got: %v", defaultGroups)
 	}
 	if defaultTags[0] != "38454722" || defaultTags[1] != "38454723" {
 		t.Fatalf("unexpected defaultTags: %v", defaultTags)
@@ -165,19 +167,19 @@ func TestMultipleDefaultOutboundsCreateBalancerAndObservatory(t *testing.T) {
 	if len(routerConfig.BalancingRule) == 0 {
 		t.Fatal("expected BalancingRule in routerConfig")
 	}
-	if routerConfig.BalancingRule[0].Tag != "default_balancer" {
-		t.Fatalf("expected balancer tag default_balancer, got: %s", routerConfig.BalancingRule[0].Tag)
+	if routerConfig.BalancingRule[0].Tag != balancerTag {
+		t.Fatalf("expected balancer tag %s, got: %s", balancerTag, routerConfig.BalancingRule[0].Tag)
 	}
 
 	foundRule := false
 	for _, r := range routerConfig.Rule {
-		if r.GetBalancingTag() == "default_balancer" {
+		if r.GetBalancingTag() == balancerTag {
 			foundRule = true
 			break
 		}
 	}
 	if !foundRule {
-		t.Fatal("expected router rule with balancerTag default_balancer")
+		t.Fatalf("expected router rule with balancerTag %s", balancerTag)
 	}
 
 	found1, found2 := false, false
@@ -200,11 +202,11 @@ func TestDefaultOutboundArrayParsesMultipleOutbounds(t *testing.T) {
 			"tag": "wg_arr_1",
 			"protocol": "wireguard",
 			"settings": {
-				"secretKey": "COYrxmQRV27b/5XUMrhxa70XhkT5JFAkYqLARDNKSW4=",
+				"secretKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 				"address": ["10.2.0.2/32"],
 				"peers": [{
-					"publicKey": "NfKOMtk2fuDycbQXv36yk5mfdgDA8/8SN6amCdFrKxQ=",
-					"endpoint": "188.214.152.226:51820",
+					"publicKey": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+					"endpoint": "192.0.2.10:51820",
 					"allowedIPs": ["0.0.0.0/0"]
 				}]
 			}
@@ -213,11 +215,11 @@ func TestDefaultOutboundArrayParsesMultipleOutbounds(t *testing.T) {
 			"tag": "wg_arr_2",
 			"protocol": "wireguard",
 			"settings": {
-				"secretKey": "COYrxmQRV27b/5XUMrhxa70XhkT5JFAkYqLARDNKSW4=",
+				"secretKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 				"address": ["10.2.0.3/32"],
 				"peers": [{
-					"publicKey": "NfKOMtk2fuDycbQXv36yk5mfdgDA8/8SN6amCdFrKxQ=",
-					"endpoint": "188.214.152.227:51820",
+					"publicKey": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+					"endpoint": "192.0.2.11:51820",
 					"allowedIPs": ["0.0.0.0/0"]
 				}]
 			}
@@ -232,14 +234,73 @@ func TestDefaultOutboundArrayParsesMultipleOutbounds(t *testing.T) {
 		},
 	}}
 
-	_, _, _, obsConfig, defaultTags, err := GetCustomConfig(infos)
+	_, _, _, obsConfig, defaultGroups, err := GetCustomConfig(infos)
 	if err != nil {
 		t.Fatalf("GetCustomConfig with array failed: %v", err)
 	}
-	if len(defaultTags) != 2 || defaultTags[0] != "wg_arr_1" || defaultTags[1] != "wg_arr_2" {
-		t.Fatalf("expected [wg_arr_1, wg_arr_2], got: %v", defaultTags)
+	defaultTags := defaultGroups[defaultBalancerTag("node1")]
+	if len(defaultGroups) != 1 || len(defaultTags) != 2 || defaultTags[0] != "wg_arr_1" || defaultTags[1] != "wg_arr_2" {
+		t.Fatalf("expected [wg_arr_1, wg_arr_2], got: %v", defaultGroups)
 	}
 	if obsConfig == nil {
 		t.Fatal("obsConfig is nil")
+	}
+}
+
+func TestDefaultOutboundsAreScopedToTheirInbound(t *testing.T) {
+	first := `{"tag":"wg-node-81","protocol":"freedom","settings":{}}`
+	second := `{"tag":"wg-node-82","protocol":"freedom","settings":{}}`
+	infos := []*panel.NodeInfo{
+		{Id: 81, Tag: "node-81", Common: &panel.CommonNode{Routes: []panel.Route{{Id: 1, Action: "default_out", ActionValue: &first}}}},
+		{Id: 82, Tag: "node-82", Common: &panel.CommonNode{Routes: []panel.Route{{Id: 2, Action: "default_out", ActionValue: &second}}}},
+	}
+	_, _, routerConfig, _, groups, err := GetCustomConfig(infos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for inboundTag, want := range map[string]string{"node-81": "wg-node-81", "node-82": "wg-node-82"} {
+		group := defaultBalancerTag(inboundTag)
+		if got := groups[group]; len(got) != 1 || got[0] != want {
+			t.Fatalf("%s candidates = %v, want only %s", inboundTag, got, want)
+		}
+		found := false
+		for _, rule := range routerConfig.Rule {
+			if len(rule.InboundTag) == 1 && rule.InboundTag[0] == inboundTag && rule.GetBalancingTag() == group {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing isolated routing rule for %s", inboundTag)
+		}
+	}
+}
+
+func TestDefaultOutboundRejectsEmptyArray(t *testing.T) {
+	for _, invalid := range []string{`[]`, `[null]`, `null`, `[null,{"tag":"a","protocol":"freedom"}]`} {
+		t.Run(invalid, func(t *testing.T) {
+			_, _, _, _, _, err := GetCustomConfig([]*panel.NodeInfo{{
+				Id: 81, Tag: "node-81", Common: &panel.CommonNode{Routes: []panel.Route{{Id: 1, Action: "default_out", ActionValue: &invalid}}},
+			}})
+			if err == nil {
+				t.Fatal("invalid default_out must not fall back to the VPS direct outbound")
+			}
+		})
+	}
+}
+
+func TestSharedOutboundIsAllowedButConflictingTagsAreRejected(t *testing.T) {
+	first := `{"tag":"shared-wg","protocol":"freedom","settings":{}}`
+	for _, second := range []string{first, `{"tag":"shared-wg","protocol":"blackhole","settings":{}}`} {
+		_, _, _, _, groups, err := GetCustomConfig([]*panel.NodeInfo{
+			{Id: 1, Tag: "node1", Common: &panel.CommonNode{Routes: []panel.Route{{Action: "default_out", ActionValue: &first}}}},
+			{Id: 2, Tag: "node2", Common: &panel.CommonNode{Routes: []panel.Route{{Action: "default_out", ActionValue: &second}}}},
+		})
+		if second == first {
+			if err != nil || len(groups) != 2 {
+				t.Fatalf("same shared config must work in separate groups: %v", err)
+			}
+		} else if err == nil {
+			t.Fatal("conflicting outbound definitions were silently deduplicated")
+		}
 	}
 }

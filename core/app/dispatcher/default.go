@@ -126,6 +126,7 @@ func (r *cachedReader) Interrupt() {
 
 // DefaultDispatcher is a default implementation of Dispatcher.
 type DefaultDispatcher struct {
+	stickyBalancer            *StickyBalancer
 	ohm                       outbound.Manager
 	router                    routing.Router
 	policy                    policy.Manager
@@ -182,16 +183,17 @@ func ConfigureSessionLimits(perUser, global int) {
 
 func init() {
 	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
-		d := new(DefaultDispatcher)
+		d := &DefaultDispatcher{stickyBalancer: NewStickyBalancer()}
 		if err := core.RequireFeatures(ctx, func(om outbound.Manager, router routing.Router, pm policy.Manager, sm stats.Manager, dc dns.Client) error {
 			core.OptionalFeatures(ctx, func(fdns dns.FakeDNSEngine) {
 				d.fdns = fdns
 			})
 			core.OptionalFeatures(ctx, func(obs extension.Observatory) {
-				globalStickyBalancer.SetObservatory(ctx, obs)
+				d.stickyBalancer.SetObservatory(ctx, obs)
 			})
 			return d.Init(config.(*Config), om, router, pm, sm)
 		}); err != nil {
+			d.stickyBalancer.Close()
 			return nil, err
 		}
 		return d, nil
@@ -402,6 +404,9 @@ func (*DefaultDispatcher) Start() error {
 
 // Close implements common.Closable.
 func (d *DefaultDispatcher) Close() error {
+	if d.stickyBalancer != nil {
+		d.stickyBalancer.Close()
+	}
 	type drain struct {
 		key       interface{}
 		manager   *LinkManager
@@ -814,7 +819,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 		if route, err := d.router.PickRoute(routingLink); err == nil {
 			outTag := route.GetOutboundTag()
 			ruleTag := route.GetRuleTag()
-			if ruleTag == "default_balancer" || outTag == "default_balancer" {
+			if d.stickyBalancer != nil && d.stickyBalancer.HasGroup(ruleTag) {
 				sessionInbound := session.InboundFromContext(ctx)
 				sessionKey := ""
 				if sessionInbound != nil {
@@ -824,7 +829,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 						sessionKey = sessionInbound.Source.Address.String()
 					}
 				}
-				if stickyTag := globalStickyBalancer.PickOutbound(sessionKey); stickyTag != "" {
+				if stickyTag := d.stickyBalancer.PickOutboundForGroup(ruleTag, sessionKey); stickyTag != "" {
 					outTag = stickyTag
 				}
 			}

@@ -304,8 +304,8 @@ func TestAllVPNProtocolsInboundAndUsers(t *testing.T) {
 						ServerName: "www.microsoft.com",
 						Dest:       "www.microsoft.com",
 						ServerPort: "443",
-						PrivateKey: "1DPuqNuqAeziTDmHOAg5EeU3bAisao0j26np6HOLTYU",
-						ShortId:    "2e47c7ee",
+						PrivateKey: testRealityPrivateKey(t),
+						ShortId:    "01234567",
 					},
 				},
 			},
@@ -380,7 +380,7 @@ func TestAllVPNProtocolsInboundAndUsers(t *testing.T) {
 				Id: 9, Type: "tuic", Security: panel.Tls,
 				Common: &panel.CommonNode{
 					ListenIP: "0.0.0.0", ServerPort: 10009,
-					CertInfo: dummyCert,
+					CertInfo:          dummyCert,
 					CongestionControl: "bbr",
 				},
 			},
@@ -461,53 +461,3 @@ func TestAllVPNProtocolsInboundAndUsers(t *testing.T) {
 		})
 	}
 }
-
-func TestLiveNode81ConfigAndWireGuardBalancer(t *testing.T) {
-	node81JSON := []byte(`{"listen_ip":"0.0.0.0","server_port":830,"network":"tcp","network_settings":null,"protocol":"vless","tls":2,"tls_settings":{"server_name":"www.lonza.com","cert_mode":"self","provider":null,"dns_env":null,"reject_unknown_sni":"0","allow_insecure":"0","public_key":"djJRsFrR16Wcoc1UH8dgBbACt_W8B_Nk7nBdwPNSfBM","private_key":"1DPuqNuqAeziTDmHOAg5EeU3bAisao0j26np6HOLTYU","short_id":"2e47c7ee","server_port":"443"},"encryption":null,"encryption_settings":null,"flow":null,"cipher":null,"congestion_control":null,"zero_rtt_handshake":false,"up_mbps":0,"down_mbps":0,"obfs":null,"obfs_password":null,"padding_scheme":null,"ignore_client_bandwidth":true,"base_config":{"push_interval":60,"pull_interval":60,"node_report_min_traffic":0,"device_online_min_traffic":0},"routes":[{"id":23,"match":[],"action":"default_out","action_value":"[\n{\n  \"tag\": \"vn1\",\n  \"protocol\": \"wireguard\",\n  \"settings\": {\n    \"secretKey\": \"COYrxmQRV27b\/5XUMrhxa70XhkT5JFakYqLARDNkSW4=\",\n    \"address\": [\n      \"10.2.0.2\/32\"\n    ],\n    \"peers\": [\n      {\n        \"publicKey\": \"NfKOMtk2fuDycbQXv36yk5mfdgDA8\/8SN6amCdFrKxQ=\",\n        \"endpoint\": \"188.214.152.226:51820\",\n        \"allowedIPs\": [\n          \"0.0.0.0\/0\"\n        ],\n        \"keepAlive\": 25\n      }\n    ],\n    \"mtu\": 1280\n  }\n},\n{\n  \"tag\": \"vn2\",\n  \"protocol\": \"wireguard\",\n  \"settings\": {\n    \"secretKey\": \"YBm1l32BOxu9FWWlMhvf9F0NiXlivgEwGJv5MWgeVUM=\",\n    \"address\": [\n      \"10.2.0.2\/32\"\n    ],\n    \"peers\": [\n      {\n        \"publicKey\": \"NfKOMtk2fuDycbQXv36yk5mfdgDA8\/8SN6amCdFrKxQ=\",\n        \"endpoint\": \"188.214.152.226:51820\",\n        \"allowedIPs\": [\n          \"0.0.0.0\/0\"\n        ],\n        \"keepAlive\": 25\n      }\n    ],\n    \"mtu\": 1280\n  }\n},\n{\n  \"tag\": \"vn3\",\n  \"protocol\": \"wireguard\",\n  \"settings\": {\n    \"secretKey\": \"SITRSWxBHekZMwdbw+cc46cwpr2btFJ8WUhq2Z0X10A=\",\n    \"address\": [\n      \"10.2.0.2\/32\"\n    ],\n    \"peers\": [\n      {\n        \"publicKey\": \"NfKOMtk2fuDycbQXv36yk5mfdgDA8\/8SN6amCdFrKxQ=\",\n        \"endpoint\": \"188.214.152.226:51820\",\n        \"allowedIPs\": [\n          \"0.0.0.0\/0\"\n        ],\n        \"keepAlive\": 25\n      }\n    ],\n    \"mtu\": 1280\n  }\n}\n]"}]}`)
-
-	var cm panel.CommonNode
-	if err := json.Unmarshal(node81JSON, &cm); err != nil {
-		t.Fatalf("unmarshal node 81 json: %v", err)
-	}
-
-	nodeInfo := &panel.NodeInfo{
-		Id:       81,
-		Type:     "vless",
-		Security: panel.Reality,
-		Tag:      "node-81",
-		Common:   &cm,
-	}
-
-	inbound, err := buildInbound(nodeInfo, "node-81")
-	if err != nil {
-		t.Fatalf("buildInbound for node 81 failed: %v", err)
-	}
-	if inbound == nil {
-		t.Fatal("inbound is nil for node 81")
-	}
-
-	dnsConfig, outbounds, routerConfig, obsConfig, defaultTags, err := GetCustomConfig([]*panel.NodeInfo{nodeInfo})
-	if err != nil {
-		t.Fatalf("GetCustomConfig for node 81 failed: %v", err)
-	}
-	if dnsConfig == nil || routerConfig == nil {
-		t.Fatal("dnsConfig or routerConfig is nil")
-	}
-	if len(defaultTags) != 3 {
-		t.Fatalf("expected 3 defaultTags for WireGuard (vn1, vn2, vn3), got %v", defaultTags)
-	}
-	if obsConfig == nil {
-		t.Fatal("expected observatory config to be generated for multiple WireGuard routes")
-	}
-	// Check outbounds has vn1, vn2, vn3
-	foundWG := 0
-	for _, o := range outbounds {
-		if o.Tag == "vn1" || o.Tag == "vn2" || o.Tag == "vn3" {
-			foundWG++
-		}
-	}
-	if foundWG != 3 {
-		t.Fatalf("expected 3 wireguard outbounds, found %d", foundWG)
-	}
-}
-

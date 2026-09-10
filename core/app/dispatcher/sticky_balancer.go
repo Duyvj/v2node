@@ -9,59 +9,85 @@ import (
 	"github.com/xtls/xray-core/features/extension"
 )
 
+const defaultStickyBalancerGroup = "default_balancer"
+
 type stickySessionEntry struct {
+	group    string
 	tag      string
 	lastSeen time.Time
 }
 
-// StickyBalancer maintains sticky session affinities and balances new sessions
-// across healthy outbound targets reported by Observatory.
+// StickyBalancer maintains per-balancer session affinities and balances new
+// sessions across healthy outbound targets reported by Observatory.
 type StickyBalancer struct {
-	mu          sync.RWMutex
-	candidates  []string
-	sessions    map[string]*stickySessionEntry
-	observatory extension.Observatory
-	obsCtx      context.Context
-	stopCh      chan struct{}
+	mu              sync.RWMutex
+	candidateGroups map[string][]string
+	sessions        map[string]*stickySessionEntry
+	observatory     extension.Observatory
+	obsCtx          context.Context
+	stopCh          chan struct{}
+	closeOnce       sync.Once
 }
-
-var globalStickyBalancer = NewStickyBalancer()
 
 // NewStickyBalancer creates and returns an initialized StickyBalancer.
 func NewStickyBalancer() *StickyBalancer {
 	b := &StickyBalancer{
-		sessions: make(map[string]*stickySessionEntry),
-		stopCh:   make(chan struct{}),
+		candidateGroups: make(map[string][]string),
+		sessions:        make(map[string]*stickySessionEntry),
+		stopCh:          make(chan struct{}),
 	}
 	go b.cleanupLoop()
 	return b
 }
 
-// GetStickyBalancer returns the process-wide StickyBalancer instance.
-func GetStickyBalancer() *StickyBalancer {
-	return globalStickyBalancer
+// ConfigureStickyBalancerGroups must be called before this dispatcher starts.
+// Each core owns its groups and observation feature; preparing a replacement
+// core cannot mutate the routing state of an existing, serving core.
+func (d *DefaultDispatcher) ConfigureStickyBalancerGroups(groups map[string][]string) {
+	if d.stickyBalancer == nil {
+		d.stickyBalancer = NewStickyBalancer()
+	}
+	d.stickyBalancer.SetCandidateGroups(groups)
 }
 
-// ConfigureStickyBalancer updates the candidate outbound tags for the global sticky balancer.
-func ConfigureStickyBalancer(tags []string) {
-	globalStickyBalancer.SetCandidates(tags)
-}
-
-// SetCandidates updates the candidate tags managed by the balancer.
+// SetCandidates updates the default candidate group.
 func (b *StickyBalancer) SetCandidates(tags []string) {
+	b.SetCandidateGroups(map[string][]string{defaultStickyBalancerGroup: tags})
+}
+
+// SetCandidateGroups replaces candidate groups and drops affinities that no
+// longer reference a configured candidate.
+func (b *StickyBalancer) SetCandidateGroups(groups map[string][]string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.candidates = make([]string, len(tags))
-	copy(b.candidates, tags)
-
-	valid := make(map[string]bool, len(tags))
-	for _, t := range tags {
-		valid[t] = true
+	updated := make(map[string][]string, len(groups))
+	for group, tags := range groups {
+		if group == "" || len(tags) == 0 {
+			continue
+		}
+		seen := make(map[string]struct{}, len(tags))
+		candidates := make([]string, 0, len(tags))
+		for _, tag := range tags {
+			if tag == "" {
+				continue
+			}
+			if _, exists := seen[tag]; exists {
+				continue
+			}
+			seen[tag] = struct{}{}
+			candidates = append(candidates, tag)
+		}
+		if len(candidates) > 0 {
+			updated[group] = candidates
+		}
 	}
-	for k, v := range b.sessions {
-		if !valid[v.tag] {
-			delete(b.sessions, k)
+	b.candidateGroups = updated
+
+	for key, entry := range b.sessions {
+		candidates, exists := updated[entry.group]
+		if !exists || !containsCandidate(candidates, entry.tag) {
+			delete(b.sessions, key)
 		}
 	}
 }
@@ -74,22 +100,45 @@ func (b *StickyBalancer) SetObservatory(ctx context.Context, obs extension.Obser
 	b.observatory = obs
 }
 
-// GetCandidates returns a copy of configured candidate tags.
-func (b *StickyBalancer) GetCandidates() []string {
+// HasGroup reports whether a routing balancer has sticky candidates.
+func (b *StickyBalancer) HasGroup(group string) bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	res := make([]string, len(b.candidates))
-	copy(res, b.candidates)
-	return res
+	return len(b.candidateGroups[group]) > 0
 }
 
-// GetHealthyCandidates returns the subset of candidates considered healthy/alive.
-func (b *StickyBalancer) GetHealthyCandidates() []string {
+// GetCandidates returns a copy of the default group's configured tags.
+func (b *StickyBalancer) GetCandidates() []string {
+	return b.GetCandidatesForGroup(defaultStickyBalancerGroup)
+}
+
+// GetCandidatesForGroup returns a copy of a group's configured tags.
+func (b *StickyBalancer) GetCandidatesForGroup(group string) []string {
 	b.mu.RLock()
-	candidates := b.candidates
+	defer b.mu.RUnlock()
+	return append([]string(nil), b.candidateGroups[group]...)
+}
+
+// GetHealthyCandidates returns the healthy candidates from the default group.
+func (b *StickyBalancer) GetHealthyCandidates() []string {
+	return b.GetHealthyCandidatesForGroup(defaultStickyBalancerGroup)
+}
+
+// GetHealthyCandidatesForGroup returns candidates considered alive by
+// Observatory. Outbounds not probed yet remain eligible so a fresh core can
+// start serving before its first health-check cycle completes.
+func (b *StickyBalancer) GetHealthyCandidatesForGroup(group string) []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.healthyCandidatesLocked(group)
+}
+
+// Caller holds mu throughout observation and selection, preventing a reload
+// from assigning an outbound removed between those two operations.
+func (b *StickyBalancer) healthyCandidatesLocked(group string) []string {
+	candidates := append([]string(nil), b.candidateGroups[group]...)
 	obs := b.observatory
 	ctx := b.obsCtx
-	b.mu.RUnlock()
 
 	if len(candidates) == 0 {
 		return nil
@@ -109,90 +158,89 @@ func (b *StickyBalancer) GetHealthyCandidates() []string {
 	}
 
 	statusMap := make(map[string]*observatory.OutboundStatus, len(result.Status))
-	for _, s := range result.Status {
-		if s != nil {
-			statusMap[s.OutboundTag] = s
+	for _, status := range result.Status {
+		if status != nil {
+			statusMap[status.OutboundTag] = status
 		}
 	}
 
-	var healthy []string
+	healthy := make([]string, 0, len(candidates))
 	for _, tag := range candidates {
-		if st, ok := statusMap[tag]; ok {
-			if st.Alive {
-				healthy = append(healthy, tag)
-			}
-		} else {
-			// Untested candidates are tentatively treated as alive
+		if status, found := statusMap[tag]; !found || status.Alive {
 			healthy = append(healthy, tag)
 		}
 	}
-
 	if len(healthy) == 0 {
-		// If all candidates are marked down by probes, keep routing attempts alive
+		// Keep routing attempts alive if every probe is temporarily down.
 		return candidates
 	}
 	return healthy
 }
 
-// PickOutbound selects a sticky outbound for a session. If the session has an
-// existing assignment to a healthy tag, it remains sticky ("giữ cố định").
-// Otherwise, it assigns the least-loaded healthy candidate tag.
+// PickOutbound selects a sticky outbound from the default group.
 func (b *StickyBalancer) PickOutbound(sessionKey string) string {
-	healthy := b.GetHealthyCandidates()
+	return b.PickOutboundForGroup(defaultStickyBalancerGroup, sessionKey)
+}
+
+// PickOutboundForGroup selects a sticky outbound for one balancer group. If a
+// prior assignment is still healthy it remains fixed; otherwise it fails over
+// once and records the replacement so recovery cannot change the IP again.
+func (b *StickyBalancer) PickOutboundForGroup(group, sessionKey string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	healthy := b.healthyCandidatesLocked(group)
 	if len(healthy) == 0 {
 		return ""
 	}
-	if len(healthy) == 1 {
-		return healthy[0]
-	}
 
 	now := time.Now()
-	b.mu.Lock()
-	defer b.mu.Unlock()
 
+	key := stickySessionKey(group, sessionKey)
 	if sessionKey != "" {
-		if entry, exists := b.sessions[sessionKey]; exists {
-			for _, h := range healthy {
-				if h == entry.tag {
-					entry.lastSeen = now
-					return entry.tag
-				}
+		if entry, exists := b.sessions[key]; exists {
+			if containsCandidate(healthy, entry.tag) {
+				entry.lastSeen = now
+				return entry.tag
 			}
-			// Previously assigned outbound is no longer healthy, reassign
 		}
 	}
 
-	// Count active sessions per candidate tag
 	counts := make(map[string]int, len(healthy))
-	for _, h := range healthy {
-		counts[h] = 0
+	for _, tag := range healthy {
+		counts[tag] = 0
 	}
 	for _, entry := range b.sessions {
-		if now.Sub(entry.lastSeen) < 60*time.Minute {
-			if _, ok := counts[entry.tag]; ok {
+		if entry.group == group && now.Sub(entry.lastSeen) < 60*time.Minute {
+			if _, exists := counts[entry.tag]; exists {
 				counts[entry.tag]++
 			}
 		}
 	}
 
-	// Pick healthy candidate with minimum active sessions
 	bestTag := healthy[0]
-	minCount := counts[bestTag]
-	for _, h := range healthy[1:] {
-		if counts[h] < minCount {
-			bestTag = h
-			minCount = counts[h]
+	for _, tag := range healthy[1:] {
+		if counts[tag] < counts[bestTag] {
+			bestTag = tag
 		}
 	}
 
 	if sessionKey != "" {
-		b.sessions[sessionKey] = &stickySessionEntry{
-			tag:      bestTag,
-			lastSeen: now,
+		b.sessions[key] = &stickySessionEntry{group: group, tag: bestTag, lastSeen: now}
+	}
+	return bestTag
+}
+
+func containsCandidate(candidates []string, tag string) bool {
+	for _, candidate := range candidates {
+		if candidate == tag {
+			return true
 		}
 	}
+	return false
+}
 
-	return bestTag
+func stickySessionKey(group, sessionKey string) string {
+	return group + "\x00" + sessionKey
 }
 
 func (b *StickyBalancer) cleanupLoop() {
@@ -204,9 +252,9 @@ func (b *StickyBalancer) cleanupLoop() {
 			return
 		case now := <-ticker.C:
 			b.mu.Lock()
-			for k, v := range b.sessions {
-				if now.Sub(v.lastSeen) > 60*time.Minute {
-					delete(b.sessions, k)
+			for key, entry := range b.sessions {
+				if now.Sub(entry.lastSeen) > 60*time.Minute {
+					delete(b.sessions, key)
 				}
 			}
 			b.mu.Unlock()
@@ -216,9 +264,7 @@ func (b *StickyBalancer) cleanupLoop() {
 
 // Close terminates the balancer cleanup loop.
 func (b *StickyBalancer) Close() {
-	select {
-	case <-b.stopCh:
-	default:
+	b.closeOnce.Do(func() {
 		close(b.stopCh)
-	}
+	})
 }

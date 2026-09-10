@@ -2,6 +2,8 @@ package dispatcher
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/xtls/xray-core/app/observatory"
@@ -123,5 +125,89 @@ func TestStickyBalancerFailoverOnObservatoryUnhealthy(t *testing.T) {
 		if got := b.PickOutbound("user-failover"); got != next {
 			t.Fatalf("user failed to remain sticky on failover node: got %s, want %s", got, next)
 		}
+	}
+}
+
+func TestStickyBalancerKeepsFailoverAssignmentAfterRecovery(t *testing.T) {
+	b := NewStickyBalancer()
+	defer b.Close()
+	b.SetCandidates([]string{"WG-A", "WG-B"})
+	obs := &mockObservatory{status: []*observatory.OutboundStatus{
+		{OutboundTag: "WG-A", Alive: true},
+		{OutboundTag: "WG-B", Alive: true},
+	}}
+	b.SetObservatory(context.Background(), obs)
+
+	initial := b.PickOutbound("user-recovery")
+	for _, status := range obs.status {
+		if status.OutboundTag == initial {
+			status.Alive = false
+		}
+	}
+	failover := b.PickOutbound("user-recovery")
+	if failover == initial {
+		t.Fatal("expected a healthy failover outbound")
+	}
+	for _, status := range obs.status {
+		status.Alive = true
+	}
+	if got := b.PickOutbound("user-recovery"); got != failover {
+		t.Fatalf("session returned to recovered outbound: got %s, want %s", got, failover)
+	}
+}
+
+func TestStickyBalancerScopesSessionsToTheirBalancerGroup(t *testing.T) {
+	b := NewStickyBalancer()
+	defer b.Close()
+	b.SetCandidateGroups(map[string][]string{
+		"node-81": {"WG-81-A", "WG-81-B"},
+		"node-82": {"WG-82-A", "WG-82-B"},
+	})
+
+	for _, group := range []string{"node-81", "node-82"} {
+		for i := 0; i < 4; i++ {
+			got := b.PickOutboundForGroup(group, "same-user")
+			if !strings.HasPrefix(got, "WG-"+strings.TrimPrefix(group, "node-")+"-") {
+				t.Fatalf("group %s selected candidate %q outside its scope", group, got)
+			}
+		}
+	}
+}
+
+func TestStickyBalancerRecordsNewSessionsWithOneHealthyCandidate(t *testing.T) {
+	b := NewStickyBalancer()
+	defer b.Close()
+	b.SetCandidates([]string{"WG-A", "WG-B"})
+	obs := &mockObservatory{status: []*observatory.OutboundStatus{{OutboundTag: "WG-A", Alive: false}, {OutboundTag: "WG-B", Alive: true}}}
+	b.SetObservatory(context.Background(), obs)
+	if got := b.PickOutbound("new-user"); got != "WG-B" {
+		t.Fatalf("got %s", got)
+	}
+	obs.status[0].Alive = true
+	if got := b.PickOutbound("new-user"); got != "WG-B" {
+		t.Fatalf("new session changed after recovery: %s", got)
+	}
+}
+
+func TestStickyBalancerConcurrentSelectionAndGroupUpdate(t *testing.T) {
+	b := NewStickyBalancer()
+	defer b.Close()
+	var workers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for j := 0; j < 100; j++ {
+				b.SetCandidateGroups(map[string][]string{"node": {"WG-A", "WG-B"}})
+				if got := b.PickOutboundForGroup("node", "user"); got != "WG-A" && got != "WG-B" {
+					t.Errorf("unexpected candidate %s", got)
+				}
+			}
+		}()
+	}
+	workers.Wait()
+	b.SetCandidateGroups(map[string][]string{"node": {"WG-C"}})
+	if got := b.PickOutboundForGroup("node", "user"); got != "WG-C" {
+		t.Fatalf("removed candidate retained: %s", got)
 	}
 }

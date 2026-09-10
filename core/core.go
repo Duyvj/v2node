@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"sync"
 
+	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core/app/dispatcher"
 	_ "github.com/wyx2685/v2node/core/distro/all"
-	log "github.com/sirupsen/logrus"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/app/stats"
 	"github.com/xtls/xray-core/common/serial"
@@ -118,11 +118,10 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
 		ErrorLog:  c.LogConfig.Output,
 	}
 	// Custom config
-	dnsConfig, outBoundConfig, routeConfig, obsConfig, defaultTags, err := GetCustomConfig(infos)
+	dnsConfig, outBoundConfig, routeConfig, obsConfig, defaultGroups, err := GetCustomConfig(infos)
 	if err != nil {
 		return nil, fmt.Errorf("build custom config: %w", err)
 	}
-	dispatcher.ConfigureStickyBalancer(defaultTags)
 	// Inbound config
 	var inBoundConfig []*core.InboundHandlerConfig
 
@@ -162,6 +161,7 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create core instance: %w", err)
 	}
+	server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher).ConfigureStickyBalancerGroups(defaultGroups)
 	log.Info("Xray Core Version: ", core.Version())
 	return server, nil
 }

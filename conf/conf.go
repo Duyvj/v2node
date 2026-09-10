@@ -182,10 +182,10 @@ type GlobalDeviceLimitConfig struct {
 	// 0 disables handover. Must stay at or above 2*RefreshInterval: an address
 	// that is still transmitting only refreshes its score at that cadence, so
 	// a shorter grace would evict a second client that is genuinely active.
-	HandoverGrace         *int     `mapstructure:"HandoverGrace"`
-	MaxIPsPerUser         int      `mapstructure:"MaxIPsPerUser"`
-	KeyPrefix             string   `mapstructure:"KeyPrefix"`
-	FailClosed            bool     `mapstructure:"FailClosed"`
+	HandoverGrace *int   `mapstructure:"HandoverGrace"`
+	MaxIPsPerUser int    `mapstructure:"MaxIPsPerUser"`
+	KeyPrefix     string `mapstructure:"KeyPrefix"`
+	FailClosed    bool   `mapstructure:"FailClosed"`
 	// Pointer allows omitted SyncEnabled to default to true while still
 	// honoring an explicit false in a node config.
 	SyncEnabled *bool  `mapstructure:"SyncEnabled"`
@@ -250,6 +250,10 @@ func (p *Conf) LoadFromPath(filePath string) error {
 	if err := v.ReadConfig(f); err != nil {
 		return fmt.Errorf("read config file error: %s", err)
 	}
+	// New preloads the standard profile for direct callers. Rebuild Resource
+	// from this file so a selected low/high profile does not inherit standard
+	// values, and repeated loads do not retain the previous profile's fields.
+	p.ResourceConfig = ResourceConfig{}
 	if err := v.Unmarshal(p); err != nil {
 		return fmt.Errorf("unmarshal config error: %s", err)
 	}
@@ -259,20 +263,22 @@ func (p *Conf) LoadFromPath(filePath string) error {
 	} else if p.Type != "v2board" && p.Type != "zboard" {
 		return fmt.Errorf("unsupported panel type %q, must be 'v2board' or 'zboard'", p.Type)
 	}
+	// Explicit ConnectionConfig fields take precedence over Resource/profile
+	// defaults. The compact original config still receives optimized defaults.
 	p.ResourceConfig.ApplyDefaults()
-	if p.ResourceConfig.BufferSize > 0 {
+	if !v.IsSet("ConnectionConfig.BufferSize") && p.ResourceConfig.BufferSize > 0 {
 		p.ConnectionConfig.BufferSize = int32(p.ResourceConfig.BufferSize)
 	}
-	if p.ResourceConfig.ConnectionIdle > 0 {
+	if !v.IsSet("ConnectionConfig.ConnIdle") && p.ResourceConfig.ConnectionIdle > 0 {
 		p.ConnectionConfig.ConnIdle = uint32(p.ResourceConfig.ConnectionIdle)
 	}
-	if p.ResourceConfig.Handshake > 0 {
+	if !v.IsSet("ConnectionConfig.Handshake") && p.ResourceConfig.Handshake > 0 {
 		p.ConnectionConfig.Handshake = uint32(p.ResourceConfig.Handshake)
 	}
-	if p.ResourceConfig.UplinkOnly > 0 {
+	if !v.IsSet("ConnectionConfig.UplinkOnly") && p.ResourceConfig.UplinkOnly > 0 {
 		p.ConnectionConfig.UplinkOnly = uint32(p.ResourceConfig.UplinkOnly)
 	}
-	if p.ResourceConfig.DownlinkOnly > 0 {
+	if !v.IsSet("ConnectionConfig.DownlinkOnly") && p.ResourceConfig.DownlinkOnly > 0 {
 		p.ConnectionConfig.DownlinkOnly = uint32(p.ResourceConfig.DownlinkOnly)
 	}
 	if err := p.AgentConfig.applyDefaultsAndValidate(); err != nil {
