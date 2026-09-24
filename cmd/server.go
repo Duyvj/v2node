@@ -8,7 +8,6 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
-	"runtime/metrics"
 	"syscall"
 
 	log "github.com/sirupsen/logrus"
@@ -107,7 +106,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		log.WithField("err", err).Error("Run nodes failed")
 		return
 	}
-	applyResources(c.ResourceConfig)
+	applyRuntimeDefaults()
 	log.Info("Nodes started")
 	if watch {
 		// On file change, just signal reload; do not run reload concurrently here
@@ -192,7 +191,6 @@ func reload(path string, nodes **node.Node, v2core **core.V2Core) error {
 	}
 	*nodes = nextNodes
 	*v2core = candidate
-	applyResources(next.ResourceConfig)
 	if level, err := log.ParseLevel(next.LogConfig.Level); err == nil {
 		log.SetLevel(level)
 	}
@@ -200,22 +198,10 @@ func reload(path string, nodes **node.Node, v2core **core.V2Core) error {
 	return nil
 }
 
-var baselineMemoryLimit = debug.SetMemoryLimit(-1)
-var baselineGC = func() int {
-	s := []metrics.Sample{{Name: "/gc/gogc:percent"}}
-	metrics.Read(s)
-	return int(s[0].Value.Uint64())
-}()
-
-func applyResources(r conf.ResourceConfig) {
-	gc := baselineGC
-	if r.GOGC > 0 {
-		gc = r.GOGC
+func applyRuntimeDefaults() {
+	// Respect an explicit operator environment, otherwise use a smaller heap
+	// growth target. Do not impose a fixed memory ceiling on large nodes.
+	if _, configured := os.LookupEnv("GOGC"); !configured {
+		debug.SetGCPercent(80)
 	}
-	debug.SetGCPercent(gc)
-	memory := baselineMemoryLimit
-	if r.MemoryLimitMB > 0 {
-		memory = r.MemoryLimitMB * 1024 * 1024
-	}
-	debug.SetMemoryLimit(memory)
 }

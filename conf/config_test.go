@@ -8,33 +8,22 @@ import (
 	"time"
 )
 
-func TestDefaultsAndExplicitResourceConfig(t *testing.T) {
+func TestExistingNodeConfigNeedsNoExtraSettings(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.json")
-	for _, tc := range []struct {
-		body   string
-		buffer int32
-	}{{`{"Nodes":[{"ApiHost":"https://panel.example","NodeID":1}]}`, 128}, {`{"ConnectionConfig":{"BufferSize":32},"Resource":{"GOGC":80,"MemoryLimitMB":256},"Nodes":[{"NodeID":1}]}`, 32}} {
-		if err := os.WriteFile(p, []byte(tc.body), 0600); err != nil {
+	for _, body := range []string{`{"Nodes":[{"ApiHost":"https://panel.example","NodeID":1}]}`, `{"Nodes":[{"NodeID":1}],"Log":{"Level":"warning"}}`} {
+		if err := os.WriteFile(p, []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
 		c := New()
 		if err := c.LoadFromPath(p); err != nil {
 			t.Fatal(err)
 		}
-		if c.ConnectionConfig.BufferSize != tc.buffer || c.ConnectionConfig.Handshake != 4 || c.ConnectionConfig.ConnIdle != 120 {
-			t.Fatalf("bad defaults: %+v", c.ConnectionConfig)
+		if len(c.NodeConfigs) != 1 || c.NodeConfigs[0].RetryCount == nil || *c.NodeConfigs[0].RetryCount != DefaultNodeRetryCount {
+			t.Fatal("existing node config did not load defaults")
 		}
 	}
 }
 
-func TestExamplesLoad(t *testing.T) {
-	for _, name := range []string{"config.example.json", "config.low-memory.example.json"} {
-		c := New()
-		if err := c.LoadFromPath(filepath.Join("..", name)); err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-	}
-}
 func TestWatcherCoalescesAtomicReplacementAndStops(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.json")

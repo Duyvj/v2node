@@ -66,7 +66,6 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
 	v.ohm = v.Server.GetFeature(outbound.ManagerType()).(outbound.Manager)
 	v.dispatcher = v.Server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher)
-	v.dispatcher.MetadataOnlySniffing = v.Config.ConnectionConfig.MetadataOnlySniffing
 	return nil
 }
 
@@ -103,15 +102,7 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
 	var inBoundConfig []*core.InboundHandlerConfig
 
 	// Policy config
-	levelPolicyConfig := &coreConf.Policy{
-		StatsUserUplink:   true,
-		StatsUserDownlink: true,
-		Handshake:         proto.Uint32(c.ConnectionConfig.Handshake),
-		ConnectionIdle:    proto.Uint32(c.ConnectionConfig.ConnIdle),
-		UplinkOnly:        proto.Uint32(c.ConnectionConfig.UplinkOnly),
-		DownlinkOnly:      proto.Uint32(c.ConnectionConfig.DownlinkOnly),
-		BufferSize:        proto.Int32(c.ConnectionConfig.BufferSize),
-	}
+	levelPolicyConfig := defaultUserPolicy()
 	corePolicyConfig := &coreConf.PolicyConfig{}
 	corePolicyConfig.Levels = map[uint32]*coreConf.Policy{0: levelPolicyConfig}
 	policyConfig, err := corePolicyConfig.Build()
@@ -139,4 +130,14 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
 	}
 	log.Info("Xray Core Version: ", core.Version())
 	return server, nil
+}
+
+func defaultUserPolicy() *coreConf.Policy {
+	return &coreConf.Policy{
+		StatsUserUplink: true, StatsUserDownlink: true,
+		Handshake: proto.Uint32(4), ConnectionIdle: proto.Uint32(120),
+		UplinkOnly: proto.Uint32(2), DownlinkOnly: proto.Uint32(4),
+		// Keep queues bounded per connection without changing idle semantics.
+		BufferSize: proto.Int32(32),
+	}
 }

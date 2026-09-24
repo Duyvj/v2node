@@ -98,14 +98,13 @@ func (r *cachedReader) Interrupt() {
 
 // DefaultDispatcher is a default implementation of Dispatcher.
 type DefaultDispatcher struct {
-	ohm                  outbound.Manager
-	router               routing.Router
-	policy               policy.Manager
-	stats                stats.Manager
-	fdns                 dns.FakeDNSEngine
-	Counter              sync.Map
-	LinkManagers         sync.Map // map[string]*LinkManager
-	MetadataOnlySniffing bool
+	ohm          outbound.Manager
+	router       routing.Router
+	policy       policy.Manager
+	stats        stats.Manager
+	fdns         dns.FakeDNSEngine
+	Counter      sync.Map
+	LinkManagers sync.Map // map[string]*LinkManager
 }
 
 func init() {
@@ -289,7 +288,7 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 				reader: outbound.Reader.(*pipe.Reader),
 			}
 			outbound.Reader = cReader
-			result, err := sniffer(ctx, cReader, sniffingRequest.MetadataOnly || d.MetadataOnlySniffing, destination.Network)
+			result, err := sniffer(ctx, cReader, sniffingRequest.MetadataOnly, destination.Network)
 			if err == nil {
 				content.Protocol = result.Protocol()
 			}
@@ -398,7 +397,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			reader: outbound.Reader.(buf.TimeoutReader),
 		}
 		outbound.Reader = cReader
-		result, err := sniffer(ctx, cReader, sniffingRequest.MetadataOnly || d.MetadataOnlySniffing, destination.Network)
+		result, err := sniffer(ctx, cReader, sniffingRequest.MetadataOnly, destination.Network)
 		if err == nil {
 			content.Protocol = result.Protocol()
 		}
