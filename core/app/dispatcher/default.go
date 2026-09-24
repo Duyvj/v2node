@@ -508,13 +508,15 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			return nil, nil, nil, errors.New("user session limit reached or account was quiesced")
 		}
 		inboundLink.Writer = managedWriter
+		// Splice bypasses buffer wrappers, including device lease checks.
+		sessionInbound.CanSpliceCopy = 3
 		if w != nil {
-			sessionInbound.CanSpliceCopy = 3
 			inboundLink.Writer = rate.NewRateLimitWriter(inboundLink.Writer, w)
 			outboundLink.Writer = rate.NewRateLimitWriter(outboundLink.Writer, w)
 		}
 		deviceIP := limiter.NormalizeIP(sessionInbound.Source.Address.IP().String())
-		touch := func() { limit.TouchDevice(user.Email, deviceIP) }
+		gate := &deviceSessionGate{check: func() bool { return limit.TouchDevice(ctx, user.Email, deviceIP) }}
+		touch := gate.allow
 		inboundLink.Writer = &deviceTouchWriter{writer: inboundLink.Writer, touch: touch}
 		outboundLink.Writer = &deviceTouchWriter{writer: outboundLink.Writer, touch: touch}
 		t := d.trafficCounter(sessionInbound.Tag)
@@ -682,15 +684,17 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			return errors.New("user session limit reached or account was quiesced")
 		}
 		outbound.Writer = managedWriter
+		sessionInbound.CanSpliceCopy = 3
 		if w != nil {
-			sessionInbound.CanSpliceCopy = 3
 			outbound.Writer = rate.NewRateLimitWriter(outbound.Writer, w)
 		}
 		deviceIP := limiter.NormalizeIP(sessionInbound.Source.Address.IP().String())
+		gate := &deviceSessionGate{check: func() bool { return limit.TouchDevice(ctx, user.Email, deviceIP) }}
 		outbound.Writer = &deviceTouchWriter{
 			writer: outbound.Writer,
-			touch:  func() { limit.TouchDevice(user.Email, deviceIP) },
+			touch:  gate.allow,
 		}
+		outbound.Reader = &deviceTouchReader{reader: outbound.Reader, touch: gate.allow}
 		t := d.trafficCounter(sessionInbound.Tag)
 		ts := t.GetCounter(user.Email)
 		outbound.Reader = newManagedTimeoutReader(outbound.Reader, &ts.UpCounter, manager)

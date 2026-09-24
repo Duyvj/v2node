@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/wyx2685/v2node/common/format"
 	"github.com/wyx2685/v2node/conf"
-	"github.com/redis/go-redis/v9"
 )
 
 // The Lua script makes remove-expired, capacity-check, touch and TTL refresh
@@ -22,11 +22,18 @@ const deviceLimitScript = `
 local key = KEYS[1]
 local member = ARGV[1]
 local limit = tonumber(ARGV[2])
-local now = tonumber(ARGV[3])
-local expiry = tonumber(ARGV[4])
-local grace = tonumber(ARGV[5])
+local clock = redis.call('TIME')
+local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
+local expiry = tonumber(ARGV[3])
+local grace = tonumber(ARGV[4])
 local cutoff = now - (expiry * 1000)
 redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+-- Enforce a reduced limit before renewing an existing member. Keep the most
+-- recently active addresses; the evicted sessions fail their next renewal.
+local total = redis.call('ZCARD', key)
+if limit > 0 and total > limit then
+  redis.call('ZREMRANGEBYRANK', key, 0, total - limit - 1)
+end
 if redis.call('ZSCORE', key, member) then
   redis.call('ZADD', key, now, member)
   redis.call('EXPIRE', key, expiry)
@@ -202,7 +209,7 @@ func newRedisDeviceStore(c *conf.GlobalDeviceLimitConfig, namespace string) (*re
 		timeout:   time.Duration(c.Timeout) * time.Second,
 		expiry:    time.Duration(c.Expiry) * time.Second,
 		// applyDeviceDefaults ran above, so the pointer is set.
-		grace:     time.Duration(*c.HandoverGrace) * time.Second,
+		grace: time.Duration(*c.HandoverGrace) * time.Second,
 	}, nil
 }
 
@@ -218,8 +225,7 @@ func (r *redisDeviceStore) Allow(ctx context.Context, userKey, ip string, limit 
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
-	now := time.Now().UnixMilli()
-	result, err := r.script.Run(requestCtx, r.client, []string{r.key(userKey)}, ip, strconv.Itoa(limit), strconv.FormatInt(now, 10), strconv.FormatInt(int64(r.expiry/time.Second), 10), strconv.FormatInt(int64(r.grace/time.Second), 10)).Int64Slice()
+	result, err := r.script.Run(requestCtx, r.client, []string{r.key(userKey)}, ip, strconv.Itoa(limit), strconv.FormatInt(int64(r.expiry/time.Second), 10), strconv.FormatInt(int64(r.grace/time.Second), 10)).Int64Slice()
 	if err != nil {
 		return false, err
 	}

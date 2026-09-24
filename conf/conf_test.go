@@ -7,6 +7,20 @@ import (
 	"testing"
 )
 
+func TestStrictDeviceLimitExampleLoads(t *testing.T) {
+	c := New()
+	if err := c.LoadFromPath(filepath.Join("..", "config.device-limit.example.json")); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.NodeConfigs) != 1 {
+		t.Fatal("missing example node")
+	}
+	d := c.NodeConfigs[0].GlobalDeviceLimitConfig
+	if d == nil || !d.Enable || !d.FailClosed || d.RefreshInterval != 5 || d.RedisDB != 6 {
+		t.Fatalf("strict device settings were not loaded: %+v", d)
+	}
+}
+
 func TestResourceProfilesApplyOnlyToOmittedConnectionFields(t *testing.T) {
 	for _, tc := range []struct {
 		profile string

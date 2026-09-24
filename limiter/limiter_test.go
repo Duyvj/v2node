@@ -22,18 +22,6 @@ func (s *fakeDeviceStore) Allow(ctx context.Context, userKey, ip string, limit i
 	return s.allow(ctx, userKey, ip, limit)
 }
 
-func waitForDeviceStoreCalls(t *testing.T, store *fakeDeviceStore, want int32) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if store.calls.Load() >= want {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("remote calls = %d, want at least %d", store.calls.Load(), want)
-}
-
 func TestNormalizeIP(t *testing.T) {
 	if got := normalizeIP("::ffff:192.0.2.10"); got != "192.0.2.10" {
 		t.Fatalf("mapped IPv4 normalized to %q", got)
@@ -171,7 +159,6 @@ func TestFailOpenDeviceAdmissionStillHonorsHealthyRedisDenial(t *testing.T) {
 	store := &fakeDeviceStore{allow: func(context.Context, string, string, int) (bool, error) {
 		return false, nil
 	}}
-	tracker.startRemoteRefresh(1)
 	defer tracker.Close()
 
 	for attempt := 0; attempt < 2; attempt++ {
@@ -184,126 +171,85 @@ func TestFailOpenDeviceAdmissionStillHonorsHealthyRedisDenial(t *testing.T) {
 	}
 }
 
-func TestFailOpenConcurrentSameIPCannotBypassHealthyRedisDenial(t *testing.T) {
+func TestDeviceRefreshWaitsForDecisionAndSharesSuccessfulRenewal(t *testing.T) {
 	tracker := newDeviceTracker(nil)
-	started := make(chan struct{}, 2)
+	defer tracker.Close()
+	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
 	store := &fakeDeviceStore{allow: func(context.Context, string, string, int) (bool, error) {
-		started <- struct{}{}
+		entered <- struct{}{}
 		<-release
-		return false, nil
+		return true, nil
 	}}
-	tracker.startRemoteRefresh(1)
-	defer tracker.Close()
-
-	type result struct {
-		allowed bool
-		err     error
-	}
-	results := make(chan result, 2)
-	for i := 0; i < 2; i++ {
+	results := make(chan bool, 20)
+	for i := 0; i < 20; i++ {
 		go func() {
-			allowed, err := tracker.Observe(context.Background(), store, false, "user", "192.0.2.1", 1, 1, time.Now())
-			results <- result{allowed: allowed, err: err}
+			allowed, _ := tracker.Observe(context.Background(), store, true, "user", "192.0.2.1", 1, 2, time.Now())
+			results <- allowed
 		}()
 	}
-	for i := 0; i < 2; i++ {
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			t.Fatal("concurrent admission did not wait for Redis")
-		}
+	<-entered
+	select {
+	case <-results:
+		t.Fatal("bytes admitted before Redis decision")
+	case <-time.After(20 * time.Millisecond):
 	}
 	close(release)
-	for i := 0; i < 2; i++ {
-		result := <-results
-		if result.allowed || result.err != nil {
-			t.Fatalf("concurrent denial result %d: allowed=%v err=%v", i, result.allowed, result.err)
-		}
-	}
-}
-
-func TestFailOpenApprovedDeviceRefreshIsNonblockingAndSingleFlightPerIP(t *testing.T) {
-	tracker := newDeviceTracker(nil)
-	started := make(chan struct{}, 1)
-	var block atomic.Bool
-	store := &fakeDeviceStore{allow: func(ctx context.Context, _, _ string, _ int) (bool, error) {
-		if !block.Load() {
-			return true, nil
-		}
-		started <- struct{}{}
-		<-ctx.Done()
-		return true, ctx.Err()
-	}}
-	tracker.startRemoteRefresh(1)
-	defer tracker.Close()
-	now := time.Now()
-	if allowed, err := tracker.Observe(context.Background(), store, false, "user", "192.0.2.1", 1, 1, now); !allowed || err != nil {
-		t.Fatalf("initial Redis admission: allowed=%v err=%v", allowed, err)
-	}
-	block.Store(true)
-	now = time.Now().Add(tracker.refresh + time.Second)
-	start := time.Now()
 	for i := 0; i < 20; i++ {
-		if allowed, err := tracker.Observe(context.Background(), store, false, "user", "192.0.2.1", 1, 1, now); !allowed || err != nil {
-			t.Fatalf("fail-open observe %d: allowed=%v err=%v", i, allowed, err)
+		select {
+		case allowed := <-results:
+			if !allowed {
+				t.Fatal("successful shared admission rejected")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("admission stuck")
 		}
 	}
-	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Fatalf("fail-open path blocked for %s", elapsed)
-	}
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("background refresh did not start")
-	}
-	if got := store.calls.Load(); got != 2 {
-		t.Fatalf("same IP created %d total Redis calls, want admission + one refresh", got)
+	if store.calls.Load() != 1 {
+		t.Fatalf("calls=%d, want one", store.calls.Load())
 	}
 }
 
-func TestFailOpenDeviceRefreshOpensCircuitAfterRedisError(t *testing.T) {
+func TestFailOpenOutageStillLimitsLocalIPsAndRechecksRecovery(t *testing.T) {
 	tracker := newDeviceTracker(nil)
 	store := &fakeDeviceStore{allow: func(context.Context, string, string, int) (bool, error) {
 		return false, errors.New("redis unavailable")
 	}}
-	tracker.startRemoteRefresh(1)
-	defer tracker.Close()
 	now := time.Now()
-	if allowed, err := tracker.Observe(context.Background(), store, false, "user", "192.0.2.1", 1, 2, now); !allowed || err == nil {
-		t.Fatalf("initial Redis failure should fail open and report the error: allowed=%v err=%v", allowed, err)
-	}
-	waitForDeviceStoreCalls(t, store, 1)
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		tracker.mu.Lock()
-		open := time.Now().Before(tracker.circuitUntil)
-		tracker.mu.Unlock()
-		if open {
-			break
+	for i, ip := range []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"} {
+		allowed, _ := tracker.Observe(context.Background(), store, false, "user", ip, 1, 2, now)
+		if allowed != (i < 2) {
+			t.Fatalf("IP %s allowed=%v", ip, allowed)
 		}
-		time.Sleep(time.Millisecond)
 	}
-	tracker.mu.Lock()
-	open := time.Now().Before(tracker.circuitUntil)
-	tracker.mu.Unlock()
-	if !open {
-		t.Fatal("Redis error did not open cooldown circuit")
+	if store.calls.Load() != 1 {
+		t.Fatalf("cooldown calls=%d", store.calls.Load())
 	}
-	if allowed, err := tracker.Observe(context.Background(), store, false, "user", "192.0.2.2", 1, 2, time.Now()); !allowed || err != nil {
-		t.Fatalf("circuit fail-open observe: allowed=%v err=%v", allowed, err)
-	}
-	time.Sleep(20 * time.Millisecond)
-	if got := store.calls.Load(); got != 1 {
-		t.Fatalf("cooldown made %d remote calls, want 1", got)
-	}
-
-	tracker.mu.Lock()
-	tracker.circuitUntil = time.Now().Add(-time.Millisecond)
-	tracker.mu.Unlock()
+	tracker.circuitUntil = time.Now().Add(-time.Second)
 	store.allow = func(context.Context, string, string, int) (bool, error) { return false, nil }
 	if allowed, err := tracker.Observe(context.Background(), store, false, "user", "192.0.2.2", 1, 2, time.Now()); allowed || err != nil {
-		t.Fatalf("unapproved fail-open entry bypassed Redis after recovery: allowed=%v err=%v", allowed, err)
+		t.Fatalf("healthy Redis denial ignored after recovery: %v %v", allowed, err)
+	}
+}
+
+func TestConcurrentAdmissionCannotResurrectDeletedUser(t *testing.T) {
+	tracker := newDeviceTracker(nil)
+	entered, release := make(chan struct{}), make(chan struct{})
+	store := &fakeDeviceStore{allow: func(context.Context, string, string, int) (bool, error) {
+		close(entered)
+		<-release
+		return true, nil
+	}}
+	result := make(chan bool, 1)
+	go func() {
+		allowed, _ := tracker.Observe(context.Background(), store, true, "user", "192.0.2.1", 1, 2, time.Now())
+		result <- allowed
+	}()
+	<-entered
+	tracker.Delete("user")
+	close(release)
+	if <-result {
+		t.Fatal("deleted user was admitted by a late Redis response")
 	}
 }
 

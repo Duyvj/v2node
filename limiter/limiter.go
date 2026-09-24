@@ -9,11 +9,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/format"
 	"github.com/wyx2685/v2node/common/rate"
 	"github.com/wyx2685/v2node/conf"
-	log "github.com/sirupsen/logrus"
 )
 
 var limitLock sync.RWMutex
@@ -73,9 +73,6 @@ func AddLimiter(nodetype string, tag string, users []panel.UserInfo, alive map[i
 			}
 		} else {
 			l.remote = remote
-			if !l.failClosed {
-				l.devices.startRemoteRefresh(2)
-			}
 		}
 	}
 	for i := range users {
@@ -119,9 +116,7 @@ func (l *Limiter) Close() {
 }
 
 func (l *Limiter) UpdateAliveList(alive map[int]int) {
-	// Keep the panel's last global count as a conservative fallback when Redis
-	// is disabled. The tracker still owns current local IPs and never reads this
-	// map without copying it under a lock.
+	// A panel count is reporting data, not an atomic cross-node IP lease.
 	l.devices.SetAliveList(alive)
 }
 
@@ -131,9 +126,8 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		l.UserLimitInfo.Delete(key)
 		l.SpeedLimiter.Delete(key)
 		l.devices.Delete(key)
-		if l.remote != nil {
-			_ = l.remote.Delete(context.Background(), key)
-		}
+		// This credential may still be authorized on another node. Its shared
+		// Redis leases expire naturally; deleting the whole key frees live slots.
 	}
 	for i := range modified {
 		key := format.UserTag(tag, modified[i].Uuid)
@@ -203,21 +197,8 @@ func (l *Limiter) CheckLimit(ctx context.Context, taguuid string, ip string) (*r
 		}
 	}
 
-	if normalizedIP := normalizeIP(ip); normalizedIP != "" {
-		// FailClosed must also cover configuration/initialization failures. The
-		// previous implementation enforced it only after a Redis client had been
-		// created, so an unsupported network value silently bypassed the global
-		// device limit even though the administrator explicitly requested denial.
-		if info.DeviceLimit > 0 && l.remoteEnabled && l.failClosed && l.remote == nil {
-			return nil, true
-		}
-		allowed, err := l.devices.Observe(ctx, l.remote, l.failClosed, taguuid, normalizedIP, info.UID, info.DeviceLimit, now)
-		if err != nil && l.shouldLogRemoteError(now) {
-			log.WithError(err).Warn("Redis device limiter request failed; local bounded tracker is used")
-		}
-		if !allowed {
-			return nil, true
-		}
+	if !l.observeDevice(ctx, taguuid, normalizeIP(ip), info, now) {
+		return nil, true
 	}
 
 	limit := int64(determineSpeedLimit(l.SpeedLimit, determineSpeedLimit(info.SpeedLimit, info.DynamicSpeedLimit))) * 1000000 / 8
@@ -236,19 +217,34 @@ func (l *Limiter) CheckLimit(ctx context.Context, taguuid string, ip string) (*r
 	return bucket, false
 }
 
-// TouchDevice refreshes the bounded local entry and, when due, the Redis TTL.
-// It is safe to call from the data path because same-IP touches are allocation
-// free. Fail-open Redis refreshes are queued in bounded background workers;
-// FailClosed keeps its synchronous enforcement semantics.
-func (l *Limiter) TouchDevice(taguuid, ip string) {
+// TouchDevice returns whether an established session may continue. Callers
+// must drop the current buffer and terminate the session on denial.
+func (l *Limiter) TouchDevice(ctx context.Context, taguuid, ip string) bool {
 	value, ok := l.UserLimitInfo.Load(taguuid)
 	if !ok {
-		return
+		return false
 	}
+	return l.observeDevice(ctx, taguuid, ip, value.(UserLimitInfo), time.Now())
+}
+
+func (l *Limiter) observeDevice(ctx context.Context, taguuid, ip string, info UserLimitInfo, now time.Time) bool {
 	if ip == "" {
-		return
+		return info.DeviceLimit <= 0
 	}
-	_, _ = l.devices.Observe(context.Background(), l.remote, l.failClosed, taguuid, ip, value.(UserLimitInfo).UID, value.(UserLimitInfo).DeviceLimit, time.Now())
+	if info.DeviceLimit > 0 && l.remoteEnabled && l.failClosed && l.remote == nil {
+		return false
+	}
+	// A typed nil pointer becomes a non-nil interface. Pass an actual nil
+	// interface when Redis is disabled so local admission is enforced.
+	var remote deviceStore
+	if l.remote != nil {
+		remote = l.remote
+	}
+	allowed, err := l.devices.Observe(ctx, remote, l.failClosed, taguuid, ip, info.UID, info.DeviceLimit, now)
+	if err != nil && l.shouldLogRemoteError(now) {
+		log.WithError(err).WithField("fail_closed", l.failClosed).Warn("Redis device limit check failed")
+	}
+	return allowed
 }
 
 func (l *Limiter) shouldLogRemoteError(now time.Time) bool {
