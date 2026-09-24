@@ -11,6 +11,8 @@ on:
       - "go.mod"
       - "go.sum"
       - ".github/workflows/release.yml"
+      - "script/**"
+      - ".gitattributes"
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
@@ -18,6 +20,8 @@ on:
       - "go.mod"
       - "go.sum"
       - ".github/workflows/release.yml"
+      - "script/**"
+      - ".gitattributes"
   release:
     types: [published]
 
@@ -36,10 +40,25 @@ jobs:
       GOEXPERIMENT: jsonv2
     steps:
       - uses: actions/checkout@v5
+      - run: bash script/check-scripts.sh
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26.x'
       - run: go test -p 2 -race -count=1 -timeout=180s ./...
+
+  scripts:
+    needs: test
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify release scripts
+        run: bash script/check-scripts.sh
+      - name: Upload release scripts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" script/install.sh script/v2node.sh --repo "$GITHUB_REPOSITORY" --clobber
 
   build:
     needs: test

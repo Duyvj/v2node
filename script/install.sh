@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -o pipefail
+
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
@@ -40,30 +42,49 @@ VERSION_ARG=""
 API_HOST_ARG=""
 NODE_ID_ARG=""
 API_KEY_ARG=""
+RELEASE_REPO_ARG="Duyvj/v2node"
+RELEASE_BRANCH_ARG="main"
 
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --api-host)
-                API_HOST_ARG="$2"; shift 2 ;;
-            --node-id)
-                NODE_ID_ARG="$2"; shift 2 ;;
-            --api-key)
-                API_KEY_ARG="$2"; shift 2 ;;
+            --api-host|--node-id|--api-key|--release-repo|--release-branch)
+                if [[ $# -lt 2 || -z "$2" || "$2" == --* ]]; then
+                    echo "Missing value for $1" >&2
+                    return 1
+                fi
+                case "$1" in
+                    --api-host) API_HOST_ARG="$2" ;;
+                    --node-id) NODE_ID_ARG="$2" ;;
+                    --api-key) API_KEY_ARG="$2" ;;
+                    --release-repo) RELEASE_REPO_ARG="$2" ;;
+                    --release-branch) RELEASE_BRANCH_ARG="$2" ;;
+                esac
+                shift 2 ;;
             -h|--help)
                 echo "用法: $0 [版本号] [--api-host URL] [--node-id ID] [--api-key KEY]"
                 exit 0 ;;
             --*)
-                echo "未知参数: $1"; exit 1 ;;
+                echo "Unknown argument: $1" >&2; return 1 ;;
             *)
                 # 兼容第一个位置参数作为版本号
                 if [[ -z "$VERSION_ARG" ]]; then
                     VERSION_ARG="$1"; shift
                 else
-                    shift
+                    echo "Unexpected argument: $1" >&2; return 1
                 fi ;;
         esac
     done
+    if [[ ! "$RELEASE_REPO_ARG" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
+        || [[ ! "$RELEASE_BRANCH_ARG" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] \
+        || [[ "$RELEASE_BRANCH_ARG" == *..* || "$RELEASE_BRANCH_ARG" == *//* ]]; then
+        echo "Invalid release repository or branch" >&2
+        return 1
+    fi
+    if [[ -n "$VERSION_ARG" && ! "$VERSION_ARG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]; then
+        echo "Invalid version" >&2
+        return 1
+    fi
 }
 
 arch=$(uname -m)
@@ -176,13 +197,13 @@ install_base() {
             echo "安装 EPEL 源..."
             yum install -y epel-release >/dev/null 2>&1
         fi
-        need_install_yum wget curl unzip tar cronie socat ca-certificates pv
+        need_install_yum wget curl unzip tar cronie socat ca-certificates pv openssl
         update-ca-trust force-enable >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"alpine" ]]; then
-        need_install_apk wget curl unzip tar socat ca-certificates pv
+        need_install_apk wget curl unzip tar socat ca-certificates pv openssl
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"debian" ]]; then
-        need_install_apt wget curl unzip tar cron socat ca-certificates pv
+        need_install_apt wget curl unzip tar cron socat ca-certificates pv openssl
         update-ca-certificates >/dev/null 2>&1 || true
     elif [[ x"${release}" == x"ubuntu" ]]; then
         need_install_apt wget curl unzip tar cron socat ca-certificates pv
@@ -248,50 +269,67 @@ EOF
             systemctl restart v2node
         fi
         sleep 2
-        check_status
-        echo -e ""
-        if [[ $? == 0 ]]; then
+        if check_status; then
             echo -e "${green}v2node 重启成功${plain}"
         else
             echo -e "${red}v2node 可能启动失败，请使用 v2node log 查看日志信息${plain}"
+            return 1
         fi
 }
 
-install_v2node() {
-    local version_param="$1"
-    if [[ -e /usr/local/v2node/ ]]; then
-        rm -rf /usr/local/v2node/
-    fi
-
-    mkdir /usr/local/v2node/ -p
-    cd /usr/local/v2node/
-
-    if  [[ -z "$version_param" ]] ; then
-        last_version=$(curl -Ls "https://api.github.com/repos/Duyvj/v2node/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}检测 v2node 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 v2node 版本安装${plain}"
-            exit 1
-        fi
-        echo -e "${green}检测到最新版本：${last_version}，开始安装...${plain}"
-        url="https://github.com/Duyvj/v2node/releases/download/${last_version}/v2node-linux-${arch}.zip"
-        curl -sL "$url" | pv -s 30M -W -N "下载进度" > /usr/local/v2node/v2node-linux.zip
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 v2node 失败，请确保你的服务器能够下载 Github 的文件${plain}"
-            exit 1
-        fi
+install_v2node() (
+    local version_param="$1" staging previous expected actual file
+    if [[ -z "$version_param" ]]; then
+        last_version=$(curl -fsSL --retry 3 --connect-timeout 15 \
+            "https://api.github.com/repos/${RELEASE_REPO_ARG}/releases/latest" \
+            | awk -F'"' '/"tag_name":/ && !found {print $4; found=1}') || return 1
     else
-    last_version=$version_param
-        url="https://github.com/Duyvj/v2node/releases/download/${last_version}/v2node-linux-${arch}.zip"
-        curl -sL "$url" | pv -s 30M -W -N "下载进度" > /usr/local/v2node/v2node-linux.zip
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 v2node $1 失败，请确保此版本存在${plain}"
-            exit 1
-        fi
+        last_version="$version_param"
+    fi
+    if [[ ! "$last_version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]]; then
+        echo "Invalid release version" >&2
+        return 1
     fi
 
-    unzip v2node-linux.zip
-    rm v2node-linux.zip -f
-    chmod +x v2node
+    # Validate a complete download before touching the installed runtime.
+    mkdir -p /usr/local || return 1
+    staging=$(mktemp -d /usr/local/v2node-download.XXXXXX) || return 1
+    trap 'rm -rf -- "$staging"' EXIT
+    url="https://github.com/${RELEASE_REPO_ARG}/releases/download/${last_version}/v2node-linux-${arch}.zip"
+    curl -fL --retry 3 --connect-timeout 15 --max-time 300 "$url" -o "$staging/runtime.zip" || return 1
+    curl -fsSL --retry 3 --connect-timeout 15 --max-time 60 "$url.dgst" -o "$staging/runtime.dgst" || return 1
+    expected=$(grep -Eo '(^|[[:space:]=])[a-fA-F0-9]{64}([[:space:]]|$)' "$staging/runtime.dgst" \
+        | tr -d ' =\r' | head -n 1 | tr 'A-F' 'a-f')
+    actual=$(openssl dgst -sha256 "$staging/runtime.zip" | awk '{print tolower($NF)}')
+    if [[ ! "$expected" =~ ^[a-f0-9]{64}$ || "$actual" != "$expected" ]]; then
+        echo "Archive SHA-256 verification failed; installed runtime retained." >&2
+        return 1
+    fi
+    unzip -tq "$staging/runtime.zip" >/dev/null || return 1
+    mkdir "$staging/runtime" || return 1
+    for file in v2node geoip.dat geosite.dat; do
+        unzip -p "$staging/runtime.zip" "$file" > "$staging/runtime/$file" || return 1
+        [[ -s "$staging/runtime/$file" ]] || return 1
+    done
+    chmod 755 "$staging/runtime/v2node" || return 1
+    curl -fsSL --retry 3 --connect-timeout 15 \
+        "https://raw.githubusercontent.com/${RELEASE_REPO_ARG}/${RELEASE_BRANCH_ARG}/script/v2node.sh" \
+        -o "$staging/manager.sh" || return 1
+    if LC_ALL=C grep -q $'\r' "$staging/manager.sh" || ! bash -n "$staging/manager.sh"; then
+        echo "Invalid manager script; installed runtime retained." >&2
+        return 1
+    fi
+
+    if [[ -e /usr/local/v2node ]]; then
+        previous=$(mktemp -d /usr/local/v2node-backup.XXXXXX) || return 1
+        mv /usr/local/v2node "$previous/runtime" || return 1
+        echo "Previous runtime saved at $previous/runtime"
+    fi
+    if ! mv "$staging/runtime" /usr/local/v2node; then
+        [[ -z "$previous" ]] || mv "$previous/runtime" /usr/local/v2node
+        return 1
+    fi
+    cd /usr/local/v2node || return 1
     mkdir /etc/v2node/ -p
     cp geoip.dat /etc/v2node/
     cp geosite.dat /etc/v2node/
@@ -350,11 +388,10 @@ EOF
     if [[ ! -f /etc/v2node/config.json ]]; then
         # 如果通过 CLI 传入了完整参数，则直接生成配置并跳过交互
         if [[ -n "$API_HOST_ARG" && -n "$NODE_ID_ARG" && -n "$API_KEY_ARG" ]]; then
-            generate_v2node_config "$API_HOST_ARG" "$NODE_ID_ARG" "$API_KEY_ARG"
+            generate_v2node_config "$API_HOST_ARG" "$NODE_ID_ARG" "$API_KEY_ARG" || return 1
             echo -e "${green}已根据参数生成 /etc/v2node/config.json${plain}"
             first_install=false
         else
-            cp config.json /etc/v2node/
             first_install=true
         fi
     else
@@ -364,22 +401,19 @@ EOF
             systemctl start v2node
         fi
         sleep 2
-        check_status
-        echo -e ""
-        if [[ $? == 0 ]]; then
+        if check_status; then
             echo -e "${green}v2node 重启成功${plain}"
         else
             echo -e "${red}v2node 可能启动失败，请使用 v2node log 查看日志信息${plain}"
+            return 1
         fi
         first_install=false
     fi
 
 
-    curl -o /usr/bin/v2node -Ls https://raw.githubusercontent.com/Duyvj/v2node/main/script/v2node.sh
-    chmod +x /usr/bin/v2node
+    install -m 755 "$staging/manager.sh" /usr/bin/v2node || return 1
 
-    cd $cur_dir
-    rm -f install.sh
+    cd "$cur_dir" || return 1
     echo "------------------------------------------"
     echo -e "管理脚本使用方法: "
     echo "------------------------------------------"
@@ -398,7 +432,6 @@ EOF
     echo "v2node uninstall    - 卸载 v2node"
     echo "v2node version      - 查看 v2node 版本"
     echo "------------------------------------------"
-    curl -fsS --max-time 10 "https://api.v-50.me/counter" || true
 
     if [[ $first_install == true ]]; then
         read -rp "检测到你为第一次安装 v2node，是否自动生成 /etc/v2node/config.json？(y/n): " if_generate
@@ -416,9 +449,9 @@ EOF
             echo "${green}已跳过自动生成配置。如需后续生成，可执行: v2node generate${plain}"
         fi
     fi
-}
+)
 
-parse_args "$@"
+parse_args "$@" || exit 1
 echo -e "${green}开始安装${plain}"
 install_base
 install_v2node "$VERSION_ARG"
