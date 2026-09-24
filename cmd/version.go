@@ -9,7 +9,7 @@ import (
 var (
 	version  = "TempVersion" //use ldflags replace
 	codename = "v2node"
-	intro    = "V2Board/XBoard backend based on modified xray-core"
+	intro    = "A V2board backend based on modified xray-core"
 )
 
 var versionCommand = cobra.Command{

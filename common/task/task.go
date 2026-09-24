@@ -10,159 +10,93 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// taskCancellationGrace is deliberately short compared with the controller
-// reload timeout. Task callbacks receive a cancelled context and must unwind;
-// a broken third-party client must not hold reload or shutdown forever.
-const taskCancellationGrace = 10 * time.Second
-
+// A Task owns one worker. Cancellation and join prevent reloads from leaving
+// detached requests, overlapping reports or callbacks using a closed core.
 type Task struct {
 	Name     string
 	Interval time.Duration
 	Execute  func(context.Context) error
-	Access   sync.RWMutex
-	Running  bool
 	ReloadCh chan struct{}
-	Stop     chan struct{}
-	Done     chan struct{}
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	done     chan struct{}
 }
 
 func (t *Task) Start(first bool) error {
-	return t.StartAfter(first, 0)
-}
-
-// StartAfter starts a periodic task with an optional initial phase offset.
-// Subsequent executions retain the configured interval.
-func (t *Task) StartAfter(first bool, initialDelay time.Duration) error {
-	t.Access.Lock()
-	if t.Running {
-		t.Access.Unlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.done != nil {
 		return nil
 	}
-	t.Running = true
-	stop := make(chan struct{})
+	if t.Interval <= 0 || t.Execute == nil {
+		return fmt.Errorf("invalid periodic task %q", t.Name)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	t.Stop = stop
-	t.Done = done
-	t.Access.Unlock()
-	go func(stop <-chan struct{}, done chan struct{}) {
-		defer func() {
-			t.Access.Lock()
-			if t.Done == done {
-				t.Running = false
-			}
-			t.Access.Unlock()
-			close(done)
-		}()
-		if first {
-			if err := t.executeWithTimeout(stop); err != nil {
-				log.Errorf("Task %s initial execution error: %v; retrying after %s", t.Name, err, t.Interval)
-			}
-		}
-
-		if !first && initialDelay > 0 {
-			timer := time.NewTimer(initialDelay)
-			select {
-			case <-timer.C:
-			case <-stop:
-				timer.Stop()
-				return
-			}
-		}
-
-		timer := time.NewTimer(t.Interval)
-		defer timer.Stop()
-		for {
-			select {
-			case <-timer.C:
-				// continue
-			case <-stop:
-				return
-			}
-
-			if err := t.executeWithTimeout(stop); err != nil {
-				// Panel outages are expected control-plane failures, not a reason to
-				// permanently stop traffic/accounting synchronization. Keep the
-				// periodic worker alive so it heals without restarting Xray.
-				log.Errorf("Task %s execution error: %v; keeping runtime and retrying", t.Name, err)
-			}
-			timer.Reset(t.Interval)
-		}
-	}(stop, done)
-
+	t.cancel = cancel
+	t.done = done
+	go t.run(ctx, done, first)
 	return nil
 }
-
-func (t *Task) ExecuteWithTimeout() error {
-	return t.executeWithTimeout(nil)
-}
-
-func (t *Task) executeWithTimeout(stop <-chan struct{}) error {
-	ctx, cancel := context.WithTimeout(context.Background(), min(5*t.Interval, 5*time.Minute))
-	defer cancel()
-	done := make(chan error, 1)
-
-	go func() {
-		done <- t.Execute(ctx)
-	}()
-
-	select {
-	case <-stop:
-		cancel()
-		return waitForTaskCancellation(t.Name, done)
-	case <-ctx.Done():
-		log.Errorf("Task %s execution timed out, reloading", t.Name)
-		if t.ReloadCh != nil {
+func (t *Task) run(ctx context.Context, done chan struct{}, first bool) {
+	defer close(done)
+	timer := time.NewTimer(t.Interval)
+	defer timer.Stop()
+	for {
+		if !first {
 			select {
-			case t.ReloadCh <- struct{}{}:
-			default:
+			case <-ctx.Done():
+				return
+			case <-timer.C:
 			}
-		} else {
-			log.Panic("Reload failed")
 		}
-		return waitForTaskCancellation(t.Name, done)
-	case err := <-done:
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil
+		first = false
+		if ctx.Err() != nil {
+			return
 		}
-		return err
+		err := t.execute(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			log.WithError(err).Warnf("Task %s failed; retrying next interval", t.Name)
+		}
+		timer.Reset(t.Interval)
 	}
 }
-
-func waitForTaskCancellation(name string, done <-chan error) error {
-	timer := time.NewTimer(taskCancellationGrace)
+func (t *Task) execute(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, min(5*t.Interval, 5*time.Minute))
+	defer cancel()
+	err := t.Execute(ctx)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) && parent.Err() == nil && t.ReloadCh != nil {
+		select {
+		case t.ReloadCh <- struct{}{}:
+		default:
+		}
+	}
+	return err
+}
+func (t *Task) ExecuteWithTimeout() error { return t.execute(context.Background()) }
+func (t *Task) Close() error {
+	t.mu.Lock()
+	done, cancel := t.done, t.cancel
+	t.mu.Unlock()
+	if done == nil {
+		return nil
+	}
+	cancel()
+	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	select {
-	case err := <-done:
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil
+	case <-done:
+		t.mu.Lock()
+		if t.done == done {
+			t.done = nil
+			t.cancel = nil
 		}
-		return err
+		t.mu.Unlock()
+		return nil
 	case <-timer.C:
-		return fmt.Errorf("task %s did not stop within %s", name, taskCancellationGrace)
+		return fmt.Errorf("task %s did not stop", t.Name)
 	}
-}
-
-func (t *Task) safeStop() <-chan struct{} {
-	t.Access.Lock()
-	done := t.Done
-	if t.Running {
-		t.Running = false
-		close(t.Stop)
-	}
-	t.Access.Unlock()
-	return done
-}
-
-func (t *Task) Close() {
-	if done := t.safeStop(); done != nil {
-		<-done
-	}
-	log.Warningf("Task %s stopped", t.Name)
-}
-
-// SignalStop prevents future executions without waiting for an already-running
-// callback. Terminal process shutdown uses this bounded primitive; Close keeps
-// its existing wait-for-completion behavior for ordinary reloads.
-func (t *Task) SignalStop() {
-	_ = t.safeStop()
 }

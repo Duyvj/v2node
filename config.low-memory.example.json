@@ -1,12 +1,12 @@
 {
   "Log": { "Level": "warning", "Output": "", "Access": "none" },
-  "Resource": { "GOGC": 0, "MemoryLimitMB": 0 },
+  "Resource": { "GOGC": 80, "MemoryLimitMB": 256 },
   "ConnectionConfig": {
     "Handshake": 4,
     "ConnIdle": 120,
     "UplinkOnly": 2,
     "DownlinkOnly": 4,
-    "BufferSize": 128,
+    "BufferSize": 32,
     "MetadataOnlySniffing": false
   },
   "Nodes": [

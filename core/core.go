@@ -29,7 +29,6 @@ type AddUsersParams struct {
 type V2Core struct {
 	Config     *conf.Conf
 	ReloadCh   chan struct{}
-	SnapshotCh chan struct{}
 	access     sync.Mutex
 	Server     *core.Instance
 	users      *UserMap
@@ -38,31 +37,16 @@ type V2Core struct {
 	dispatcher *dispatcher.DefaultDispatcher
 }
 
-// RequestSnapshot coalesces last-known-good persistence requests. User sync
-// may update several logical nodes at once; one whole-runtime snapshot after
-// those changes is sufficient.
-func (v *V2Core) RequestSnapshot() {
-	if v == nil || v.SnapshotCh == nil {
-		return
-	}
-	select {
-	case v.SnapshotCh <- struct{}{}:
-	default:
-	}
-}
-
 type UserMap struct {
-	uidMap   map[string]int
-	quiesced map[string]struct{}
-	mapLock  sync.RWMutex
+	uidMap  map[string]int
+	mapLock sync.RWMutex
 }
 
 func New(config *conf.Conf) *V2Core {
 	core := &V2Core{
 		Config: config,
 		users: &UserMap{
-			uidMap:   make(map[string]int),
-			quiesced: make(map[string]struct{}),
+			uidMap: make(map[string]int),
 		},
 	}
 	return core
@@ -71,17 +55,18 @@ func New(config *conf.Conf) *V2Core {
 func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	v.access.Lock()
 	defer v.access.Unlock()
-	server, err := getCore(v.Config, infos)
+	var err error
+	v.Server, err = getCore(v.Config, infos)
 	if err != nil {
 		return err
 	}
-	v.Server = server
 	if err := v.Server.Start(); err != nil {
 		return err
 	}
 	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
 	v.ohm = v.Server.GetFeature(outbound.ManagerType()).(outbound.Manager)
 	v.dispatcher = v.Server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher)
+	v.dispatcher.MetadataOnlySniffing = v.Config.ConnectionConfig.MetadataOnlySniffing
 	return nil
 }
 
@@ -91,26 +76,18 @@ func (v *V2Core) Close() error {
 	if v.Server == nil {
 		return nil
 	}
-	// Keep every handle intact until Xray confirms that all features closed.
-	// The caller can then retry a failed close without dereferencing a core that
-	// this method prematurely marked as gone.
-	if err := v.Server.Close(); err != nil {
-		return err
-	}
-	v.Config = nil
 	v.ihm = nil
 	v.ohm = nil
 	v.dispatcher = nil
+	err := v.Server.Close()
 	v.Server = nil
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
 func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
-	dispatcher.ConfigureUDPContentSniffing(c.ConnectionConfig.DisableUDPContentSniffing)
-	dispatcher.ConfigureSessionLimits(
-		c.ConnectionConfig.MaxConnectionsPerUser,
-		c.ConnectionConfig.MaxConnections,
-	)
 	// Log Config
 	coreLogConfig := &coreConf.LogConfig{
 		LogLevel:  c.LogConfig.Level,
@@ -118,7 +95,7 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
 		ErrorLog:  c.LogConfig.Output,
 	}
 	// Custom config
-	dnsConfig, outBoundConfig, routeConfig, obsConfig, defaultGroups, err := GetCustomConfig(infos)
+	dnsConfig, outBoundConfig, routeConfig, err := GetCustomConfig(infos)
 	if err != nil {
 		return nil, fmt.Errorf("build custom config: %w", err)
 	}
@@ -137,31 +114,29 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
 	}
 	corePolicyConfig := &coreConf.PolicyConfig{}
 	corePolicyConfig.Levels = map[uint32]*coreConf.Policy{0: levelPolicyConfig}
-	policyConfig, _ := corePolicyConfig.Build()
+	policyConfig, err := corePolicyConfig.Build()
+	if err != nil {
+		return nil, err
+	}
 	// Build Xray conf
-	apps := []*serial.TypedMessage{
-		serial.ToTypedMessage(coreLogConfig.Build()),
-		serial.ToTypedMessage(&dispatcher.Config{}),
-		serial.ToTypedMessage(&stats.Config{}),
-		serial.ToTypedMessage(&proxyman.InboundConfig{}),
-		serial.ToTypedMessage(&proxyman.OutboundConfig{}),
-		serial.ToTypedMessage(policyConfig),
-		serial.ToTypedMessage(dnsConfig),
-		serial.ToTypedMessage(routeConfig),
-	}
-	if obsConfig != nil {
-		apps = append(apps, serial.ToTypedMessage(obsConfig))
-	}
 	config := &core.Config{
-		App:      apps,
+		App: []*serial.TypedMessage{
+			serial.ToTypedMessage(coreLogConfig.Build()),
+			serial.ToTypedMessage(&dispatcher.Config{}),
+			serial.ToTypedMessage(&stats.Config{}),
+			serial.ToTypedMessage(&proxyman.InboundConfig{}),
+			serial.ToTypedMessage(&proxyman.OutboundConfig{}),
+			serial.ToTypedMessage(policyConfig),
+			serial.ToTypedMessage(dnsConfig),
+			serial.ToTypedMessage(routeConfig),
+		},
 		Inbound:  inBoundConfig,
 		Outbound: outBoundConfig,
 	}
 	server, err := core.New(config)
 	if err != nil {
-		return nil, fmt.Errorf("create core instance: %w", err)
+		return nil, fmt.Errorf("create core: %w", err)
 	}
-	server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher).ConfigureStickyBalancerGroups(defaultGroups)
 	log.Info("Xray Core Version: ", core.Version())
 	return server, nil
 }

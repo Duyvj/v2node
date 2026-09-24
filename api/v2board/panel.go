@@ -1,26 +1,25 @@
 package panel
 
 import (
-	"crypto/tls"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/wyx2685/v2node/conf"
 	"github.com/go-resty/resty/v2"
+	"github.com/wyx2685/v2node/conf"
 )
 
 // Panel is the interface for different panel's api.
 
 type Client struct {
 	client           *resty.Client
+	reportClient     *resty.Client
+	transport        *boundedTransport
 	APIHost          string
-	AgentID          string
 	Token            string
 	NodeId           int
 	nodeEtag         string
@@ -28,38 +27,15 @@ type Client struct {
 	responseBodyHash string
 	UserList         *UserListBody
 	AliveMap         *AliveMap
-	fallbackConfig   *conf.GlobalDeviceLimitConfig
-	fallbackMu       sync.Mutex
 }
-
-// UpdateFallbackConfig changes only the signed Redis user-snapshot source.
-// It does not touch Xray inbounds, users, or the device limiter.
-func (c *Client) UpdateFallbackConfig(config *conf.GlobalDeviceLimitConfig) {
-	c.fallbackMu.Lock()
-	c.fallbackConfig = cloneGlobalDeviceLimitConfig(config)
-	c.fallbackMu.Unlock()
-}
-
-// Ordinary panel responses are small JSON documents. Keep a hard ceiling so
-// a compromised/misconfigured endpoint cannot make the root Agent buffer an
-// unbounded body. The user list is streamed separately in user.go.
-const maxBufferedPanelResponseBytes = 8 << 20
 
 func New(c *conf.NodeConfig) (*Client, error) {
-	if c == nil {
-		return nil, fmt.Errorf("node client requires a config")
-	}
-	if strings.TrimSpace(c.Key) == "" {
-		return nil, fmt.Errorf("node client requires an ApiKey/token")
-	}
-	apiHost, err := conf.NormalizePanelAPIHost(c.APIHost)
-	if err != nil {
-		return nil, fmt.Errorf("node client: %w", err)
-	}
 	client := resty.New()
-	client.SetResponseBodyLimit(maxBufferedPanelResponseBytes)
-	client.SetRedirectPolicy(resty.NoRedirectPolicy())
-	client.SetTLSClientConfig(&tls.Config{MinVersion: tls.VersionTLS12})
+	transport := &boundedTransport{base: http.DefaultTransport.(*http.Transport).Clone()}
+	transport.base.MaxIdleConns = 32
+	transport.base.MaxIdleConnsPerHost = 4
+	transport.base.MaxConnsPerHost = 8
+	client.SetTransport(transport)
 	retryCount := conf.DefaultNodeRetryCount
 	if c.RetryCount != nil {
 		retryCount = *c.RetryCount
@@ -74,38 +50,32 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	client.OnError(func(req *resty.Request, err error) {
 		var v *resty.ResponseError
 		if errors.As(err, &v) {
+			// v.Response contains the last response from the server
+			// v.Err contains the original error
 			logrus.Error(v.Err)
 		}
 	})
-	client.SetBaseURL(apiHost)
-
-	query := map[string]string{
-		"node_id": strconv.Itoa(c.NodeID),
-	}
-	if c.AgentID != "" {
-		query["node_type"] = "znode"
-		query["type"] = conf.RequiredPanelType
-		client.SetHeader("X-ZNode-Version", ClientVersion())
-		client.SetHeader("X-ZNode-Type", conf.RequiredPanelType)
-		client.SetHeader("X-ZNode-Agent-ID", c.AgentID)
-		client.SetHeader("X-ZNode-Instance-ID", effectiveInstanceID(c.AgentInstanceID))
-		setInstanceSecretHeader(client)
-		client.SetHeader("X-ZNode-Agent-Token", c.Key)
-		client.SetAuthToken(c.Key)
-		setAddressHeaders(client)
-	} else {
-		query["node_type"] = "v2node"
-		query["token"] = c.Key
-	}
-	client.SetQueryParams(query)
+	client.SetBaseURL(c.APIHost)
+	// set params
+	client.SetQueryParams(map[string]string{
+		"node_type": "v2node",
+		"node_id":   strconv.Itoa(c.NodeID),
+		"token":     c.Key,
+	})
 	return &Client{
-		client:         client,
-		Token:          c.Key,
-		APIHost:        apiHost,
-		AgentID:        c.AgentID,
-		NodeId:         c.NodeID,
-		UserList:       &UserListBody{},
-		AliveMap:       &AliveMap{},
-		fallbackConfig: cloneGlobalDeviceLimitConfig(c.GlobalDeviceLimitConfig),
+		client:       client,
+		reportClient: client.Clone().SetRetryCount(0),
+		transport:    transport,
+		Token:        c.Key,
+		APIHost:      c.APIHost,
+		NodeId:       c.NodeID,
+		UserList:     &UserListBody{},
+		AliveMap:     &AliveMap{},
 	}, nil
+}
+
+func (c *Client) Close() {
+	if c.transport != nil {
+		c.transport.CloseIdleConnections()
+	}
 }

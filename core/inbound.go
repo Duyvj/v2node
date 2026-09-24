@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -25,46 +24,13 @@ type NetworkSettingsProxyProtocol struct {
 	AcceptProxyProtocol bool `json:"acceptProxyProtocol"`
 }
 
-// unmarshalNetworkSettings accepts the object form used by current ZBoard
-// rows and the legacy one-element array form emitted by older panels.
-func unmarshalNetworkSettings(raw json.RawMessage, target any) error {
-	value := strings.TrimSpace(string(raw))
-	if strings.HasPrefix(value, "[") {
-		var items []json.RawMessage
-		if err := json.Unmarshal(raw, &items); err != nil {
-			return err
-		}
-		for _, item := range items {
-			if strings.HasPrefix(strings.TrimSpace(string(item)), "{") {
-				raw = item
-				break
-			}
-		}
-		if len(items) == 0 {
-			raw = json.RawMessage(`{}`)
-		}
-	}
-	return json.Unmarshal(raw, target)
-}
-
 func (v *V2Core) removeInbound(tag string) error {
-	return v.removeInboundContext(context.Background(), tag)
-}
-
-func (v *V2Core) removeInboundContext(parent context.Context, tag string) error {
-	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return v.ihm.RemoveHandler(ctx, tag)
 }
 
 func (v *V2Core) addInbound(config *core.InboundHandlerConfig) error {
-	return v.addInboundContext(context.Background(), config)
-}
-
-func (v *V2Core) addInboundContext(parent context.Context, config *core.InboundHandlerConfig) error {
-	if err := parent.Err(); err != nil {
-		return err
-	}
 	rawHandler, err := core.CreateObject(v.Server, config)
 	if err != nil {
 		return err
@@ -73,7 +39,7 @@ func (v *V2Core) addInboundContext(parent context.Context, config *core.InboundH
 	if !ok {
 		return fmt.Errorf("not an InboundHandler: %s", err)
 	}
-	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := v.ihm.AddHandler(ctx, handler); err != nil {
 		return err
@@ -81,34 +47,10 @@ func (v *V2Core) addInboundContext(parent context.Context, config *core.InboundH
 	return nil
 }
 
-// needsInboundSniffing keeps content inspection off for ordinary proxy nodes.
-// Domain/protocol routes still need the detected hostname, but routeOnly makes
-// sure a VPS resolver cannot replace the destination selected by the client.
-func needsInboundSniffing(nodeInfo *panel.NodeInfo) bool {
-	if nodeInfo == nil || nodeInfo.Common == nil {
-		return false
-	}
-	if nodeInfo.DisableSniffing || (nodeInfo.Common != nil && nodeInfo.Common.DisableSniffing) {
-		return false
-	}
-	for _, route := range nodeInfo.Common.Routes {
-		switch route.Action {
-		case "block", "route", "protocol":
-			if len(route.Match) > 0 {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // BuildInbound build Inbound config for different protocol
 func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerConfig, error) {
-	if nodeInfo == nil || nodeInfo.Common == nil {
-		return nil, errors.New("node configuration is incomplete")
-	}
-	if nodeInfo.Security != panel.None && nodeInfo.Security != panel.Tls && nodeInfo.Security != panel.Reality {
-		return nil, fmt.Errorf("unsupported transport security mode %d", nodeInfo.Security)
+	if nodeInfo == nil || nodeInfo.Common == nil || nodeInfo.Common.ServerPort < 1 || nodeInfo.Common.ServerPort > 65535 {
+		return nil, fmt.Errorf("inbound port must be 1..65535")
 	}
 	in := &coreConf.InboundDetourConfig{}
 	var err error
@@ -121,7 +63,7 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 		err = buildTrojan(nodeInfo, in)
 	case "shadowsocks":
 		err = buildShadowsocks(nodeInfo, in)
-	case "hysteria2", "hysteria", "hy2":
+	case "hysteria2":
 		err = buildHysteria2(nodeInfo, in)
 	case "tuic":
 		err = buildTuic(nodeInfo, in)
@@ -136,7 +78,7 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	// Set network protocol
 	if len(nodeInfo.Common.NetworkSettings) > 0 {
 		n := &NetworkSettingsProxyProtocol{}
-		err := unmarshalNetworkSettings(nodeInfo.Common.NetworkSettings, n)
+		err := json.Unmarshal(nodeInfo.Common.NetworkSettings, n)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal network settings error: %s", err)
 		}
@@ -180,51 +122,39 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	in.ListenOn = &coreConf.Address{Address: ipAddress}
 	// Set SniffingConfig
 	sniffingConfig := &coreConf.SniffingConfig{
-		Enabled:      !nodeInfo.DisableSniffing && needsInboundSniffing(nodeInfo),
+		Enabled:      true,
 		DestOverride: coreConf.StringList{"http", "tls", "quic"},
-		RouteOnly:    true,
 	}
 	in.SniffingConfig = sniffingConfig
 
 	// Set TLS or Reality settings
-	security := nodeInfo.Security
-	isHysteriaOrTuic := nodeInfo.Type == "hysteria2" || nodeInfo.Type == "hysteria" || nodeInfo.Type == "hy2" || nodeInfo.Type == "tuic"
-	if isHysteriaOrTuic && security == panel.None {
-		security = panel.Tls
-	}
-	switch security {
+	switch nodeInfo.Security {
 	case panel.Tls:
 		if nodeInfo.Common.CertInfo == nil {
-			nodeInfo.Common.CertInfo = &panel.CertInfo{
-				CertMode: "self",
-				CertFile: filepath.Join("/etc/v2node/", nodeInfo.Type+strconv.Itoa(nodeInfo.Id)+".cer"),
-				KeyFile:  filepath.Join("/etc/v2node/", nodeInfo.Type+strconv.Itoa(nodeInfo.Id)+".key"),
+			return nil, errors.New("the CertInfo is not vail")
+		}
+		switch nodeInfo.Common.CertInfo.CertMode {
+		case "none", "":
+			break
+		default:
+			if in.StreamSetting == nil {
+				in.StreamSetting = &coreConf.StreamConfig{}
 			}
-		}
-		if nodeInfo.Common.CertInfo.CertMode == "none" || nodeInfo.Common.CertInfo.CertMode == "" {
-			if isHysteriaOrTuic {
-				nodeInfo.Common.CertInfo.CertMode = "self"
-			} else {
-				return nil, errors.New("TLS transport requires certificate material")
-			}
-		}
-		if in.StreamSetting == nil {
-			in.StreamSetting = &coreConf.StreamConfig{}
-		}
-		in.StreamSetting.Security = "tls"
-		in.StreamSetting.TLSSettings = &coreConf.TLSConfig{
-			Certs: []*coreConf.TLSCertConfig{
-				{
-					CertFile:     nodeInfo.Common.CertInfo.CertFile,
-					KeyFile:      nodeInfo.Common.CertInfo.KeyFile,
-					OcspStapling: 3600,
+			in.StreamSetting.Security = "tls"
+			in.StreamSetting.TLSSettings = &coreConf.TLSConfig{
+				Certs: []*coreConf.TLSCertConfig{
+					{
+						CertFile:     nodeInfo.Common.CertInfo.CertFile,
+						KeyFile:      nodeInfo.Common.CertInfo.KeyFile,
+						OcspStapling: 3600,
+					},
 				},
-			},
-			RejectUnknownSNI: nodeInfo.Common.CertInfo.RejectUnknownSni,
-		}
-		if isHysteriaOrTuic {
-			alpnList := &coreConf.StringList{"h3"}
-			in.StreamSetting.TLSSettings.ALPN = alpnList
+				RejectUnknownSNI: nodeInfo.Common.CertInfo.RejectUnknownSni,
+			}
+			if nodeInfo.Type == "hysteria2" || nodeInfo.Type == "tuic" {
+				alpnList := &coreConf.StringList{"h3"}
+				in.StreamSetting.TLSSettings.ALPN = alpnList
+			}
 		}
 	case panel.Reality:
 		if in.StreamSetting == nil {
@@ -238,7 +168,7 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 		if dest == "" {
 			dest = v.TlsSettings.PrimaryServerName()
 		}
-		xver := uint64(v.TlsSettings.Xver)
+		xver := v.TlsSettings.Xver
 		d, err := json.Marshal(fmt.Sprintf(
 			"%s:%s",
 			dest,
@@ -259,21 +189,6 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	default:
 		break
 	}
-
-	// Optimize TCP socket keepalive to eliminate carrier NAT timeouts and prevent connection drops
-	if in.StreamSetting == nil {
-		in.StreamSetting = &coreConf.StreamConfig{}
-	}
-	if in.StreamSetting.SocketSettings == nil {
-		in.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
-	}
-	if in.StreamSetting.SocketSettings.TCPKeepAliveInterval == 0 {
-		in.StreamSetting.SocketSettings.TCPKeepAliveInterval = 15
-	}
-	if in.StreamSetting.SocketSettings.TCPKeepAliveIdle == 0 {
-		in.StreamSetting.SocketSettings.TCPKeepAliveIdle = 15
-	}
-
 	in.Tag = tag
 	return in.Build()
 }
@@ -315,32 +230,29 @@ func buildVLess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
 	switch v.Network {
 	case "tcp":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.TCPSettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.TCPSettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal tcp settings error: %s", err)
 		}
 	case "ws":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.WSSettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.WSSettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal ws settings error: %s", err)
 		}
 	case "grpc":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.GRPCSettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.GRPCSettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal grpc settings error: %s", err)
 		}
 	case "httpupgrade":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.HTTPUPGRADESettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.HTTPUPGRADESettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal httpupgrade settings error: %s", err)
 		}
 	case "splithttp", "xhttp":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.SplitHTTPSettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.SplitHTTPSettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal xhttp settings error: %s", err)
-		}
-		if err := applyXHTTPAntiTSPUDefaults(inbound.StreamSetting.SplitHTTPSettings); err != nil {
-			return fmt.Errorf("apply xhttp defaults error: %s", err)
 		}
 	default:
 		return errors.New("the network type is not vail")
@@ -365,32 +277,29 @@ func buildVMess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
 	switch v.Network {
 	case "tcp":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.TCPSettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.TCPSettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal tcp settings error: %s", err)
 		}
 	case "ws":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.WSSettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.WSSettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal ws settings error: %s", err)
 		}
 	case "grpc":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.GRPCSettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.GRPCSettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal grpc settings error: %s", err)
 		}
 	case "httpupgrade":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.HTTPUPGRADESettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.HTTPUPGRADESettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal httpupgrade settings error: %s", err)
 		}
 	case "splithttp", "xhttp":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.SplitHTTPSettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.SplitHTTPSettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal xhttp settings error: %s", err)
-		}
-		if err := applyXHTTPAntiTSPUDefaults(inbound.StreamSetting.SplitHTTPSettings); err != nil {
-			return fmt.Errorf("apply xhttp defaults error: %s", err)
 		}
 	default:
 		return errors.New("the network type is not vail")
@@ -417,17 +326,17 @@ func buildTrojan(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig
 	}
 	switch network {
 	case "tcp":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.TCPSettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.TCPSettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal tcp settings error: %s", err)
 		}
 	case "ws":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.WSSettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.WSSettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal ws settings error: %s", err)
 		}
 	case "grpc":
-		err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.GRPCSettings)
+		err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.GRPCSettings)
 		if err != nil {
 			return fmt.Errorf("unmarshal grpc settings error: %s", err)
 		}
@@ -544,11 +453,7 @@ func buildHysteria2(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourCon
 		}
 	}
 	if s.Obfs != "" && s.ObfsPassword != "" {
-		obfsJSON, err := json.Marshal(map[string]string{"password": s.ObfsPassword})
-		if err != nil {
-			return fmt.Errorf("marshal hysteria2 obfs settings error: %s", err)
-		}
-		rawobfsJSON := json.RawMessage(obfsJSON)
+		rawobfsJSON := json.RawMessage(fmt.Sprintf(`{"password":"%s"}`, s.ObfsPassword))
 		finalmask.Udp = []conf.Mask{
 			{
 				Type:     s.Obfs,
@@ -594,32 +499,29 @@ func buildAnyTLS(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig
 	if len(v.NetworkSettings) != 0 {
 		switch v.Network {
 		case "tcp":
-			err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.TCPSettings)
+			err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.TCPSettings)
 			if err != nil {
 				return fmt.Errorf("unmarshal tcp settings error: %s", err)
 			}
 		case "ws":
-			err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.WSSettings)
+			err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.WSSettings)
 			if err != nil {
 				return fmt.Errorf("unmarshal ws settings error: %s", err)
 			}
 		case "grpc":
-			err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.GRPCSettings)
+			err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.GRPCSettings)
 			if err != nil {
 				return fmt.Errorf("unmarshal grpc settings error: %s", err)
 			}
 		case "httpupgrade":
-			err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.HTTPUPGRADESettings)
+			err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.HTTPUPGRADESettings)
 			if err != nil {
 				return fmt.Errorf("unmarshal httpupgrade settings error: %s", err)
 			}
 		case "splithttp", "xhttp":
-			err := unmarshalNetworkSettings(v.NetworkSettings, &inbound.StreamSetting.SplitHTTPSettings)
+			err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.SplitHTTPSettings)
 			if err != nil {
 				return fmt.Errorf("unmarshal xhttp settings error: %s", err)
-			}
-			if err := applyXHTTPAntiTSPUDefaults(inbound.StreamSetting.SplitHTTPSettings); err != nil {
-				return fmt.Errorf("apply xhttp defaults error: %s", err)
 			}
 		default:
 			return errors.New("the network type is not vail")

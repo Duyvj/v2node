@@ -1,366 +1,247 @@
 package limiter
 
 import (
-	"context"
 	"errors"
 	"net/netip"
-	"strings"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/format"
 	"github.com/wyx2685/v2node/common/rate"
-	"github.com/wyx2685/v2node/conf"
 )
 
 var limitLock sync.RWMutex
-var limiter map[string]*Limiter
+var limiter = make(map[string]*Limiter)
+
+const deviceTTL = 60 * time.Second
+const maxTrackedIPs = 256
+
+type Limiter struct {
+	Nodetype string
+	users    sync.Map // user tag -> *userState; membership changes only on panel updates
+	alive    atomic.Pointer[aliveSnapshot]
+	closed   atomic.Bool
+}
+type aliveSnapshot struct {
+	counts  map[int]int
+	updated time.Time
+}
+type userState struct {
+	mu                      sync.Mutex
+	uid                     int
+	speed, devices, dynamic int
+	expire                  time.Time
+	deleted                 bool
+	ips                     map[netip.Addr]int64
+	bucket                  *rate.DynamicBucket
+	bucketRate              int64
+}
 
 func Init() {
 	limitLock.Lock()
-	limiter = map[string]*Limiter{}
+	for _, l := range limiter {
+		l.closed.Store(true)
+	}
+	limiter = make(map[string]*Limiter)
 	limitLock.Unlock()
 }
-
-type Limiter struct {
-	Nodetype      string
-	SpeedLimit    int
-	UserLimitInfo *sync.Map // key: tag|uuid, value: UserLimitInfo
-	SpeedLimiter  *sync.Map // key: tag|uuid, value: *DynamicBucket
-	devices       *deviceTracker
-	remote        *redisDeviceStore
-	remoteEnabled bool
-	failClosed    bool
-	lastRemoteErr atomic.Int64
-}
-
-type UserLimitInfo struct {
-	UID               int
-	SpeedLimit        int
-	DeviceLimit       int
-	DynamicSpeedLimit int
-	ExpireTime        int64
-}
-
-func AddLimiter(nodetype string, tag string, users []panel.UserInfo, alive map[int]int, deviceConfig *conf.GlobalDeviceLimitConfig, namespace string) *Limiter {
-	if deviceConfig != nil {
-		copyConfig := *deviceConfig
-		// The config type lives in conf so it can be decoded without an import cycle.
-		// Keep the same safe defaults when callers construct it directly in tests.
-		applyDeviceDefaults(&copyConfig)
-		deviceConfig = &copyConfig
-	}
-
-	l := &Limiter{
-		Nodetype:      nodetype,
-		UserLimitInfo: new(sync.Map),
-		SpeedLimiter:  new(sync.Map),
-		devices:       newDeviceTracker(deviceConfig),
-	}
-	l.devices.SetAliveList(alive)
-	if deviceConfig != nil && deviceConfig.Enable {
-		l.remoteEnabled = true
-		l.failClosed = deviceConfig.FailClosed
-		remote, err := newRedisDeviceStore(deviceConfig, namespace)
-		if err != nil {
-			if l.failClosed {
-				log.WithError(err).Error("Redis device limiter unavailable; device-limited users fail closed")
-			} else {
-				log.WithError(err).Warn("Redis device limiter disabled; using bounded local device tracking")
-			}
-		} else {
-			l.remote = remote
-		}
-	}
-	for i := range users {
-		l.UserLimitInfo.Store(format.UserTag(tag, users[i].Uuid), UserLimitInfo{
-			UID:         users[i].Id,
-			SpeedLimit:  users[i].SpeedLimit,
-			DeviceLimit: users[i].DeviceLimit,
-		})
-	}
+func AddLimiter(nodetype, tag string, users []panel.UserInfo, alive map[int]int) *Limiter {
+	l := &Limiter{Nodetype: nodetype}
+	l.UpdateAliveList(alive)
+	l.UpdateUser(tag, users, nil, nil)
 	limitLock.Lock()
+	if old := limiter[tag]; old != nil {
+		old.closed.Store(true)
+	}
 	limiter[tag] = l
 	limitLock.Unlock()
 	return l
 }
-
-func GetLimiter(tag string) (info *Limiter, err error) {
+func GetLimiter(tag string) (*Limiter, error) {
 	limitLock.RLock()
-	info, ok := limiter[tag]
+	l := limiter[tag]
 	limitLock.RUnlock()
-	if !ok {
-		return nil, errors.New("not found")
+	if l == nil {
+		return nil, errors.New("limiter not found")
 	}
-	return info, nil
+	return l, nil
 }
-
 func DeleteLimiter(tag string) {
 	limitLock.Lock()
-	l := limiter[tag]
+	if l := limiter[tag]; l != nil {
+		l.closed.Store(true)
+	}
 	delete(limiter, tag)
 	limitLock.Unlock()
-	if l != nil {
-		l.Close()
-	}
 }
-
-func (l *Limiter) Close() {
-	l.devices.Close()
-	if l.remote != nil {
-		_ = l.remote.Close()
-	}
-}
-
 func (l *Limiter) UpdateAliveList(alive map[int]int) {
-	// A panel count is reporting data, not an atomic cross-node IP lease.
-	l.devices.SetAliveList(alive)
-}
-
-func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel.UserInfo, modified []panel.UserInfo) {
-	for i := range deleted {
-		key := format.UserTag(tag, deleted[i].Uuid)
-		l.UserLimitInfo.Delete(key)
-		l.SpeedLimiter.Delete(key)
-		l.devices.Delete(key)
-		// This credential may still be authorized on another node. Its shared
-		// Redis leases expire naturally; deleting the whole key frees live slots.
-	}
-	for i := range modified {
-		key := format.UserTag(tag, modified[i].Uuid)
-		l.UserLimitInfo.Store(key, UserLimitInfo{
-			UID:         modified[i].Id,
-			SpeedLimit:  modified[i].SpeedLimit,
-			DeviceLimit: modified[i].DeviceLimit,
-		})
-		limit := int64(determineSpeedLimit(l.SpeedLimit, modified[i].SpeedLimit)) * 1000000 / 8
-		if limit > 0 {
-			if v, ok := l.SpeedLimiter.Load(key); ok {
-				v.(*rate.DynamicBucket).Update(limit)
-			} else {
-				l.SpeedLimiter.Store(key, rate.NewDynamicBucket(limit))
-			}
-		} else {
-			l.SpeedLimiter.Delete(key)
+	copied := make(map[int]int, len(alive))
+	for uid, n := range alive {
+		if n > 0 {
+			copied[uid] = n
 		}
 	}
-	for i := range added {
-		key := format.UserTag(tag, added[i].Uuid)
-		l.UserLimitInfo.Store(key, UserLimitInfo{
-			UID:         added[i].Id,
-			SpeedLimit:  added[i].SpeedLimit,
-			DeviceLimit: added[i].DeviceLimit,
-		})
+	l.alive.Store(&aliveSnapshot{counts: copied, updated: time.Now()})
+}
+func (l *Limiter) UpdateUser(tag string, added, deleted, modified []panel.UserInfo) {
+	for _, u := range deleted {
+		key := format.UserTag(tag, u.Uuid)
+		if value, ok := l.users.LoadAndDelete(key); ok {
+			s := value.(*userState)
+			s.mu.Lock()
+			s.deleted = true
+			s.ips = nil
+			s.mu.Unlock()
+		}
+	}
+	for _, u := range modified {
+		if value, ok := l.users.Load(format.UserTag(tag, u.Uuid)); ok {
+			s := value.(*userState)
+			s.mu.Lock()
+			s.uid = u.Id
+			s.speed = u.SpeedLimit
+			s.devices = u.DeviceLimit
+			s.trim()
+			s.updateBucket(time.Now())
+			s.mu.Unlock()
+		}
+	}
+	for _, u := range added {
+		l.users.LoadOrStore(format.UserTag(tag, u.Uuid), &userState{uid: u.Id, speed: u.SpeedLimit, devices: u.DeviceLimit})
 	}
 }
-
 func (l *Limiter) UpdateDynamicSpeedLimit(tag, uuid string, limit int, expire time.Time) error {
-	key := format.UserTag(tag, uuid)
-	for {
-		v, ok := l.UserLimitInfo.Load(key)
-		if !ok {
-			return errors.New("not found")
-		}
-		old := v.(UserLimitInfo)
-		updated := old
-		updated.DynamicSpeedLimit = limit
-		updated.ExpireTime = expire.Unix()
-		if l.UserLimitInfo.CompareAndSwap(key, old, updated) {
-			return nil
-		}
+	v, ok := l.users.Load(format.UserTag(tag, uuid))
+	if !ok {
+		return errors.New("user not found")
 	}
+	s := v.(*userState)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deleted {
+		return errors.New("user removed")
+	}
+	s.dynamic = limit
+	s.expire = expire
+	s.updateBucket(time.Now())
+	return nil
 }
 
-// CheckLimit applies the per-user speed limit and the device/IP limit. It is
-// called for both TCP and UDP sessions; the old implementation skipped most
-// UDP sources and therefore never enforced the configured limit for them.
-func (l *Limiter) CheckLimit(ctx context.Context, taguuid string, ip string) (*rate.DynamicBucket, bool) {
-	infoValue, ok := l.UserLimitInfo.Load(taguuid)
+// The source-network flag remains for upstream compatibility. TCP and UDP use
+// the same admission rules. No per-handshake sync.Map or bucket is allocated.
+func (l *Limiter) CheckLimit(key, rawIP string, _ bool) (*rate.DynamicBucket, bool) {
+	if l.closed.Load() {
+		return nil, true
+	}
+	v, ok := l.users.Load(key)
 	if !ok {
 		return nil, true
 	}
-	info := infoValue.(UserLimitInfo)
+	ip, err := netip.ParseAddr(rawIP)
+	if err != nil {
+		return nil, true
+	}
+	ip = ip.Unmap()
+	s := v.(*userState)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deleted {
+		return nil, true
+	}
 	now := time.Now()
-	if info.ExpireTime != 0 && info.ExpireTime <= now.Unix() {
-		if info.SpeedLimit != 0 {
-			updated := info
-			updated.DynamicSpeedLimit = 0
-			updated.ExpireTime = 0
-			l.UserLimitInfo.CompareAndSwap(taguuid, info, updated)
-			info = updated
-		} else {
-			l.UserLimitInfo.Delete(taguuid)
+	stamp := now.UnixNano()
+	if _, exists := s.ips[ip]; !exists {
+		s.prune(stamp)
+		if s.devices > 0 {
+			if len(s.ips) >= s.devices {
+				return nil, true
+			}
+			// The legacy aggregate is a conservative hint for NEW IPs only.
+			// It is not an atomic global lease and cannot prevent cross-node races.
+			if a := l.alive.Load(); a != nil && now.Sub(a.updated) <= deviceTTL && a.counts[s.uid] >= s.devices {
+				return nil, true
+			}
+		}
+		if len(s.ips) < maxTrackedIPs {
+			if s.ips == nil {
+				s.ips = make(map[netip.Addr]int64)
+			}
+			s.ips[ip] = stamp
+		} else if s.devices > 0 {
 			return nil, true
 		}
+	} else {
+		s.ips[ip] = stamp
 	}
-
-	if !l.observeDevice(ctx, taguuid, normalizeIP(ip), info, now) {
-		return nil, true
-	}
-
-	limit := int64(determineSpeedLimit(l.SpeedLimit, determineSpeedLimit(info.SpeedLimit, info.DynamicSpeedLimit))) * 1000000 / 8
-	if limit <= 0 {
-		return nil, false
-	}
-	if v, ok := l.SpeedLimiter.Load(taguuid); ok {
-		bucket := v.(*rate.DynamicBucket)
-		return bucket, false
-	}
-	bucket := rate.NewDynamicBucket(limit)
-	actual, loaded := l.SpeedLimiter.LoadOrStore(taguuid, bucket)
-	if loaded {
-		return actual.(*rate.DynamicBucket), false
-	}
-	return bucket, false
+	s.updateBucket(now)
+	return s.bucket, false
 }
-
-// TouchDevice returns whether an established session may continue. Callers
-// must drop the current buffer and terminate the session on denial.
-func (l *Limiter) TouchDevice(ctx context.Context, taguuid, ip string) bool {
-	value, ok := l.UserLimitInfo.Load(taguuid)
-	if !ok {
-		return false
+func (s *userState) updateBucket(now time.Time) {
+	if !s.expire.IsZero() && !now.Before(s.expire) {
+		s.dynamic = 0
+		s.expire = time.Time{}
 	}
-	return l.observeDevice(ctx, taguuid, ip, value.(UserLimitInfo), time.Now())
+	value := int64(determineSpeedLimit(s.speed, s.dynamic)) * 1000000 / 8
+	if s.bucket == nil {
+		s.bucket = rate.NewDynamicBucket(value)
+		s.bucketRate = value
+		return
+	}
+	if value == s.bucketRate {
+		return
+	}
+	s.bucketRate = value
+	if s.bucket != nil {
+		s.bucket.Update(value)
+	} else if value > 0 {
+		s.bucket = rate.NewDynamicBucket(value)
+	}
 }
-
-func (l *Limiter) observeDevice(ctx context.Context, taguuid, ip string, info UserLimitInfo, now time.Time) bool {
-	if ip == "" {
-		return info.DeviceLimit <= 0
-	}
-	if info.DeviceLimit > 0 && l.remoteEnabled && l.failClosed && l.remote == nil {
-		return false
-	}
-	// A typed nil pointer becomes a non-nil interface. Pass an actual nil
-	// interface when Redis is disabled so local admission is enforced.
-	var remote deviceStore
-	if l.remote != nil {
-		remote = l.remote
-	}
-	allowed, err := l.devices.Observe(ctx, remote, l.failClosed, taguuid, ip, info.UID, info.DeviceLimit, now)
-	if err != nil && l.shouldLogRemoteError(now) {
-		log.WithError(err).WithField("fail_closed", l.failClosed).Warn("Redis device limit check failed")
-	}
-	return allowed
-}
-
-func (l *Limiter) shouldLogRemoteError(now time.Time) bool {
-	last := time.Unix(0, l.lastRemoteErr.Load())
-	if now.Sub(last) < 30*time.Second {
-		return false
-	}
-	return l.lastRemoteErr.CompareAndSwap(last.UnixNano(), now.UnixNano())
-}
-
-func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
-	online, active := l.devices.Snapshot(time.Now())
-	// Buckets for users that did not appear in the current TTL window are no
-	// longer useful and are a common source of slow memory growth on long-lived
-	// nodes.
-	l.SpeedLimiter.Range(func(key, _ interface{}) bool {
-		if _, ok := active[key.(string)]; !ok {
-			l.SpeedLimiter.Delete(key)
+func (s *userState) prune(now int64) {
+	for ip, seen := range s.ips {
+		if now-seen >= int64(deviceTTL) {
+			delete(s.ips, ip)
 		}
+	}
+	if len(s.ips) == 0 {
+		s.ips = nil
+	}
+}
+func (s *userState) trim() {
+	if s.devices <= 0 || len(s.ips) <= s.devices {
+		return
+	}
+	ips := make([]netip.Addr, 0, len(s.ips))
+	for ip := range s.ips {
+		ips = append(ips, ip)
+	}
+	sort.Slice(ips, func(i, j int) bool {
+		if s.ips[ips[i]] == s.ips[ips[j]] {
+			return ips[i].Less(ips[j])
+		}
+		return s.ips[ips[i]] > s.ips[ips[j]]
+	})
+	for _, ip := range ips[s.devices:] {
+		delete(s.ips, ip)
+	}
+}
+func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
+	now := time.Now().UnixNano()
+	online := make([]panel.OnlineUser, 0, 64)
+	l.users.Range(func(_, value any) bool {
+		s := value.(*userState)
+		s.mu.Lock()
+		s.prune(now)
+		if !s.deleted {
+			for ip := range s.ips {
+				online = append(online, panel.OnlineUser{UID: s.uid, IP: ip.String()})
+			}
+		}
+		s.mu.Unlock()
 		return true
 	})
 	return &online, nil
-}
-
-func normalizeIP(raw string) string {
-	raw = strings.TrimSpace(strings.TrimPrefix(raw, "::ffff:"))
-	if raw == "" {
-		return ""
-	}
-	addr, err := netip.ParseAddr(raw)
-	if err != nil {
-		return ""
-	}
-	return addr.Unmap().String()
-}
-
-// NormalizeIP is exported for data-path wrappers so the address is parsed once
-// per session instead of once per UDP packet.
-func NormalizeIP(raw string) string {
-	return normalizeIP(raw)
-}
-
-// deviceGracePtr returns a fresh pointer. applyDeviceDefaults is handed a
-// shallow copy of the caller's config, so a default must replace the pointer
-// rather than write through it, or it would mutate the original.
-func deviceGracePtr(v int) *int {
-	return &v
-}
-
-func applyDeviceDefaults(c *conf.GlobalDeviceLimitConfig) {
-	if c.RedisNetwork == "" {
-		c.RedisNetwork = "tcp"
-	}
-	if c.RedisAddr == "" {
-		c.RedisAddr = "127.0.0.1:6379"
-	}
-	if c.Timeout <= 0 {
-		c.Timeout = 1
-	}
-	if c.Expiry <= 0 {
-		c.Expiry = 60
-	}
-	if c.Expiry < 10 {
-		c.Expiry = 10
-	}
-	if c.RefreshInterval <= 0 || c.RefreshInterval >= c.Expiry {
-		c.RefreshInterval = c.Expiry / 3
-		if c.RefreshInterval < 5 {
-			c.RefreshInterval = 5
-		}
-	}
-	if c.RefreshInterval < 5 {
-		c.RefreshInterval = 5
-	}
-	// Kept byte-for-byte in step with conf.GlobalDeviceLimitConfig.applyDefaults:
-	// a file-loaded config and an agent hot-swapped one must admit identically.
-	if c.HandoverGrace == nil {
-		c.HandoverGrace = deviceGracePtr(15)
-	}
-	if *c.HandoverGrace < 0 {
-		c.HandoverGrace = deviceGracePtr(0)
-	}
-	if *c.HandoverGrace > c.Expiry {
-		c.HandoverGrace = deviceGracePtr(c.Expiry)
-	}
-	// An address that is still transmitting only refreshes its score once per
-	// RefreshInterval, so it must get at least two chances to do so inside the
-	// grace window. Otherwise a second client that is genuinely active looks
-	// silent and gets evicted, which is the sharing case we must still refuse.
-	if grace := *c.HandoverGrace; grace > 0 {
-		if c.RefreshInterval > grace/2 {
-			c.RefreshInterval = grace / 2
-			if c.RefreshInterval < 5 {
-				c.RefreshInterval = 5
-			}
-		}
-		if c.RefreshInterval*2 > grace {
-			c.HandoverGrace = deviceGracePtr(c.RefreshInterval * 2)
-		}
-	}
-	if c.MaxIPsPerUser <= 0 {
-		c.MaxIPsPerUser = 256
-	}
-	if c.KeyPrefix == "" {
-		c.KeyPrefix = "znode:device"
-	}
-	if c.SyncChannel == "" {
-		c.SyncChannel = "v2board:device-sync"
-	}
-	if c.SyncEnabled == nil {
-		enabled := true
-		c.SyncEnabled = &enabled
-	}
-}
-
-type UserIpList struct {
-	Uid    int      `json:"Uid"`
-	IpList []string `json:"Ips"`
 }
