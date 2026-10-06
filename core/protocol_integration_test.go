@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -22,6 +23,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,7 +80,11 @@ func TestProtocolRoundTrip(t *testing.T) {
 					t.Fatal(err)
 				}
 				info.Common.Encryption = "mlkem768x25519plus"
-				info.Common.EncryptionSettings = panel.EncSettings{Mode: "native", Ticket: "600s", PrivateKey: base64.RawURLEncoding.EncodeToString(key.Bytes())}
+				pqKey, err := mlkem.GenerateKey768()
+				if err != nil {
+					t.Fatal(err)
+				}
+				info.Common.EncryptionSettings = panel.EncSettings{Mode: "native", Ticket: "600s", PrivateKey: base64.RawURLEncoding.EncodeToString(pqKey.Bytes()) + "." + base64.RawURLEncoding.EncodeToString(key.Bytes())}
 			}
 			if tc.protocol != "shadowsocks" {
 				info.Security = panel.Tls
@@ -213,15 +219,29 @@ func protocolClient(t *testing.T, info *panel.NodeInfo) *xcore.Instance {
 	case "vless", "vmess":
 		account := map[string]any{"id": protocolTestUUID, "encryption": "none", "security": "auto"}
 		if cm.Encryption == "mlkem768x25519plus" {
-			secret, err := base64.RawURLEncoding.DecodeString(cm.EncryptionSettings.PrivateKey)
-			if err != nil {
-				t.Fatal(err)
+			var publicKeys []string
+			for _, encoded := range strings.Split(cm.EncryptionSettings.PrivateKey, ".") {
+				secret, err := base64.RawURLEncoding.DecodeString(encoded)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var public []byte
+				if len(secret) == 64 {
+					key, err := mlkem.NewDecapsulationKey768(secret)
+					if err != nil {
+						t.Fatal(err)
+					}
+					public = key.EncapsulationKey().Bytes()
+				} else {
+					key, err := ecdh.X25519().NewPrivateKey(secret)
+					if err != nil {
+						t.Fatal(err)
+					}
+					public = key.PublicKey().Bytes()
+				}
+				publicKeys = append(publicKeys, base64.RawURLEncoding.EncodeToString(public))
 			}
-			key, err := ecdh.X25519().NewPrivateKey(secret)
-			if err != nil {
-				t.Fatal(err)
-			}
-			account["encryption"] = cm.Encryption + "." + cm.EncryptionSettings.Mode + ".1rtt." + base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes())
+			account["encryption"] = cm.Encryption + "." + cm.EncryptionSettings.Mode + ".1rtt." + strings.Join(publicKeys, ".")
 		}
 		if cm.Flow != "" {
 			account["flow"] = cm.Flow

@@ -46,7 +46,7 @@ jobs:
           go-version: '1.26.x'
       - run: go test -p 2 -race -count=1 -timeout=180s ./...
       - run: go vet -p 2 ./...
-      - run: go test -p 2 -race -run TestAudit -count=1 -timeout=60s ./proxy/wireguard ./transport/internet/splithttp ./transport/internet/grpc/encoding
+      - run: go test -p 2 -race -run TestAudit -count=1 -timeout=60s ./proxy/wireguard ./proxy/vless/encryption ./transport/internet/splithttp ./transport/internet/grpc/encoding
         working-directory: third_party/xray-core
 
   scripts:

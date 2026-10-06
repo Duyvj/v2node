@@ -33,11 +33,13 @@ type ServerInstance struct {
 	PaddingLens   [][3]int
 	PaddingGaps   [][3]int
 
-	RWLock   sync.RWMutex
-	Closed   bool
-	Lasts    map[int64][16]byte
-	Tickets  [][16]byte
-	Sessions map[[16]byte]*ServerSession
+	RWLock     sync.RWMutex
+	Closed     bool
+	Lasts      map[int64][16]byte
+	Tickets    [][16]byte
+	Sessions   map[[16]byte]*ServerSession
+	stopCh     chan struct{}
+	workerDone chan struct{}
 }
 
 func (i *ServerInstance) Init(nfsSKeysBytes [][]byte, xorMode uint32, secondsFrom, secondsTo int64, padding string) (err error) {
@@ -79,9 +81,18 @@ func (i *ServerInstance) Init(nfsSKeysBytes [][]byte, xorMode uint32, secondsFro
 		i.Lasts = make(map[int64][16]byte)
 		i.Tickets = make([][16]byte, 0, 1024)
 		i.Sessions = make(map[[16]byte]*ServerSession)
+		i.stopCh = make(chan struct{})
+		i.workerDone = make(chan struct{})
 		go func() {
+			defer close(i.workerDone)
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
 			for {
-				time.Sleep(time.Minute)
+				select {
+				case <-i.stopCh:
+					return
+				case <-ticker.C:
+				}
 				i.RWLock.Lock()
 				if i.Closed {
 					i.RWLock.Unlock()
@@ -109,8 +120,15 @@ func (i *ServerInstance) Init(nfsSKeysBytes [][]byte, xorMode uint32, secondsFro
 
 func (i *ServerInstance) Close() (err error) {
 	i.RWLock.Lock()
+	if !i.Closed && i.stopCh != nil {
+		close(i.stopCh)
+	}
 	i.Closed = true
+	done := i.workerDone
 	i.RWLock.Unlock()
+	if done != nil {
+		<-done
+	}
 	return
 }
 
