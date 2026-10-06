@@ -1,5 +1,7 @@
 module github.com/xtls/xray-core
 
+replace github.com/sagernet/sing-shadowsocks v0.2.7 => ../sing-shadowsocks
+
 go 1.26
 
 require (

@@ -153,7 +153,7 @@ func ListenHTTPUpgrade(ctx context.Context, address net.Address, port net.Port, 
 	}
 
 	if config := v2tls.ConfigFromStreamSettings(streamSettings); config != nil {
-		if tlsConfig := config.GetTLSConfig(); tlsConfig != nil {
+		if tlsConfig := config.GetTLSConfigWithContext(ctx); tlsConfig != nil {
 			listener = tls.NewListener(listener, tlsConfig)
 		}
 	}

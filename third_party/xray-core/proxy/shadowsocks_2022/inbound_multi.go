@@ -40,7 +40,7 @@ type MultiUserInbound struct {
 	sync.Mutex
 	networks []net.Network
 	users    []*protocol.MemoryUser
-	service  *shadowaead_2022.MultiService[int]
+	service  *shadowaead_2022.MultiService[*protocol.MemoryUser]
 }
 
 func NewMultiServer(ctx context.Context, config *MultiUserServerConfig) (*MultiUserInbound, error) {
@@ -75,12 +75,12 @@ func NewMultiServer(ctx context.Context, config *MultiUserServerConfig) (*MultiU
 	if err != nil {
 		return nil, errors.New("parse config").Base(err)
 	}
-	service, err := shadowaead_2022.NewMultiService[int](config.Method, psk, 500, inbound, nil)
+	service, err := shadowaead_2022.NewMultiService[*protocol.MemoryUser](config.Method, psk, 500, inbound, nil)
 	if err != nil {
 		return nil, errors.New("create service").Base(err)
 	}
 	err = service.UpdateUsersWithPasswords(
-		C.MapIndexed(memUsers, func(index int, it *protocol.MemoryUser) int { return index }),
+		memUsers,
 		C.Map(memUsers, func(it *protocol.MemoryUser) string { return it.Account.(*MemoryAccount).Key }),
 	)
 	if err != nil {
@@ -103,14 +103,17 @@ func (i *MultiUserInbound) AddUser(ctx context.Context, u *protocol.MemoryUser) 
 			}
 		}
 	}
-	i.users = append(i.users, u)
+	users := append(i.users, u)
 
 	// sync to multi service
 	// Considering implements shadowsocks2022 in xray-core may have better performance.
-	i.service.UpdateUsersWithPasswords(
-		C.MapIndexed(i.users, func(index int, it *protocol.MemoryUser) int { return index }),
-		C.Map(i.users, func(it *protocol.MemoryUser) string { return it.Account.(*MemoryAccount).Key }),
-	)
+	if err := i.service.UpdateUsersWithPasswords(users,
+		C.Map(users, func(it *protocol.MemoryUser) string { return it.Account.(*MemoryAccount).Key }),
+	); err != nil {
+		users[len(users)-1] = nil
+		return err
+	}
+	i.users = users
 
 	return nil
 }
@@ -136,18 +139,20 @@ func (i *MultiUserInbound) RemoveUser(ctx context.Context, email string) error {
 		return errors.New("User ", email, " not found.")
 	}
 
-	ulen := len(i.users)
-
-	i.users[idx] = i.users[ulen-1]
-	i.users[ulen-1] = nil
-	i.users = i.users[:ulen-1]
+	users := append([]*protocol.MemoryUser(nil), i.users...)
+	ulen := len(users)
+	users[idx] = users[ulen-1]
+	users[ulen-1] = nil
+	users = users[:ulen-1]
 
 	// sync to multi service
 	// Considering implements shadowsocks2022 in xray-core may have better performance.
-	i.service.UpdateUsersWithPasswords(
-		C.MapIndexed(i.users, func(index int, it *protocol.MemoryUser) int { return index }),
-		C.Map(i.users, func(it *protocol.MemoryUser) string { return it.Account.(*MemoryAccount).Key }),
-	)
+	if err := i.service.UpdateUsersWithPasswords(users,
+		C.Map(users, func(it *protocol.MemoryUser) string { return it.Account.(*MemoryAccount).Key }),
+	); err != nil {
+		return err
+	}
+	i.users = users
 
 	return nil
 }
@@ -228,8 +233,10 @@ func (i *MultiUserInbound) Process(ctx context.Context, network net.Network, con
 
 func (i *MultiUserInbound) NewConnection(ctx context.Context, conn net.Conn, metadata M.Metadata) error {
 	inbound := session.InboundFromContext(ctx)
-	userInt, _ := A.UserFromContext[int](ctx)
-	user := i.users[userInt]
+	user, ok := A.UserFromContext[*protocol.MemoryUser](ctx)
+	if !ok || user == nil {
+		return errors.New("missing authenticated Shadowsocks user")
+	}
 	inbound.User = user
 	ctx = log.ContextWithAccessMessage(ctx, &log.AccessMessage{
 		From:   metadata.Source,
@@ -252,8 +259,10 @@ func (i *MultiUserInbound) NewConnection(ctx context.Context, conn net.Conn, met
 
 func (i *MultiUserInbound) NewPacketConnection(ctx context.Context, conn N.PacketConn, metadata M.Metadata) error {
 	inbound := session.InboundFromContext(ctx)
-	userInt, _ := A.UserFromContext[int](ctx)
-	user := i.users[userInt]
+	user, ok := A.UserFromContext[*protocol.MemoryUser](ctx)
+	if !ok || user == nil {
+		return errors.New("missing authenticated Shadowsocks user")
+	}
 	inbound.User = user
 	ctx = log.ContextWithAccessMessage(ctx, &log.AccessMessage{
 		From:   metadata.Source,

@@ -245,32 +245,36 @@ func getGetCertificateFunc(c *tls.Config, ca []*Certificate) func(hello *tls.Cli
 
 func getNewGetCertificateFunc(certs []*tls.Certificate, rejectUnknownSNI bool) func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		if len(certs) == 0 {
-			return nil, errNoCertificates
-		}
-		sni := strings.ToLower(hello.ServerName)
-		if !rejectUnknownSNI && (len(certs) == 1 || sni == "") {
-			return certs[0], nil
-		}
-		gsni := "*"
-		if index := strings.IndexByte(sni, '.'); index != -1 {
-			gsni += sni[index:]
-		}
-		for _, keyPair := range certs {
-			if keyPair.Leaf.Subject.CommonName == sni || keyPair.Leaf.Subject.CommonName == gsni {
-				return keyPair, nil
-			}
-			for _, name := range keyPair.Leaf.DNSNames {
-				if name == sni || name == gsni {
-					return keyPair, nil
-				}
-			}
-		}
-		if rejectUnknownSNI {
-			return nil, errNoCertificates
-		}
+		return selectCertificate(certs, rejectUnknownSNI, hello)
+	}
+}
+
+func selectCertificate(certs []*tls.Certificate, rejectUnknownSNI bool, hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if len(certs) == 0 {
+		return nil, errNoCertificates
+	}
+	sni := strings.ToLower(hello.ServerName)
+	if !rejectUnknownSNI && (len(certs) == 1 || sni == "") {
 		return certs[0], nil
 	}
+	gsni := "*"
+	if index := strings.IndexByte(sni, '.'); index != -1 {
+		gsni += sni[index:]
+	}
+	for _, keyPair := range certs {
+		if keyPair.Leaf.Subject.CommonName == sni || keyPair.Leaf.Subject.CommonName == gsni {
+			return keyPair, nil
+		}
+		for _, name := range keyPair.Leaf.DNSNames {
+			if name == sni || name == gsni {
+				return keyPair, nil
+			}
+		}
+	}
+	if rejectUnknownSNI {
+		return nil, errNoCertificates
+	}
+	return certs[0], nil
 }
 
 func (c *Config) parseServerName() string {
@@ -365,6 +369,10 @@ func (r *RandCarrier) Read(p []byte) (n int, err error) {
 
 // GetTLSConfig converts this Config into tls.Config.
 func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
+	return c.GetTLSConfigWithContext(context.Background(), opts...)
+}
+
+func (c *Config) GetTLSConfigWithContext(ctx context.Context, opts ...Option) *tls.Config {
 	root, err := c.getCertPool()
 	if err != nil {
 		errors.LogErrorInner(context.Background(), err, "failed to load system root certificate")
@@ -411,7 +419,7 @@ func (c *Config) GetTLSConfig(opts ...Option) *tls.Config {
 	if len(caCerts) > 0 {
 		config.GetCertificate = getGetCertificateFunc(config, caCerts)
 	} else {
-		config.GetCertificate = getNewGetCertificateFunc(c.BuildCertificates(), c.RejectUnknownSni)
+		config.GetCertificate = managedCertificateGetter(ctx, c.BuildCertificates(), c.Certificate, c.RejectUnknownSni)
 	}
 
 	if sn := c.parseServerName(); len(sn) > 0 {

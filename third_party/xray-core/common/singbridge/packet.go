@@ -2,6 +2,8 @@ package singbridge
 
 import (
 	"context"
+	stdnet "net"
+	"sync"
 	"time"
 
 	B "github.com/sagernet/sing/common/buf"
@@ -35,12 +37,19 @@ type PacketConnWrapper struct {
 	net.Conn
 	Dest   net.Destination
 	cached buf.MultiBuffer
+	readMu sync.Mutex
+	closed bool
 
 	// A simple patch to avoid goroutine leak since sing infra cannot awake read block by write err
 	T *signal.ActivityTimer
 }
 
 func (w *PacketConnWrapper) ReadPacket(buffer *B.Buffer) (addr M.Socksaddr, err error) {
+	w.readMu.Lock()
+	defer w.readMu.Unlock()
+	if w.closed {
+		return M.Socksaddr{}, stdnet.ErrClosed
+	}
 	w.T.Update()
 	defer func() {
 		if err != nil {
@@ -68,7 +77,7 @@ func (w *PacketConnWrapper) ReadPacket(buffer *B.Buffer) (addr M.Socksaddr, err 
 	mb, err := w.ReadMultiBuffer()
 	nb, bb := buf.SplitFirst(mb)
 	if bb == nil {
-		return M.Socksaddr{}, nil
+		return M.Socksaddr{}, err
 	} else {
 		buffer.Write(bb.Bytes())
 		w.cached = nb
@@ -102,6 +111,13 @@ func (w *PacketConnWrapper) WritePacket(buffer *B.Buffer, destination M.Socksadd
 }
 
 func (w *PacketConnWrapper) Close() error {
+	// Wake a blocked read before waiting for its cache lock.
+	common.Interrupt(w.Reader)
+	common.Interrupt(w.Writer)
+	w.readMu.Lock()
+	defer w.readMu.Unlock()
+	w.closed = true
 	buf.ReleaseMulti(w.cached)
+	w.cached = nil
 	return nil
 }

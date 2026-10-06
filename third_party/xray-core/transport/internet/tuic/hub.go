@@ -61,7 +61,7 @@ func Listen(ctx context.Context, address xnet.Address, port xnet.Port, streamSet
 		udpConn = wrappedConn
 	}
 
-	serverTLSConfig := tlsConfig.GetTLSConfig(xtls.WithNextProto("h3"))
+	serverTLSConfig := tlsConfig.GetTLSConfigWithContext(ctx, xtls.WithNextProto("h3"))
 	if serverTLSConfig == nil {
 		_ = udpConn.Close()
 		return nil, errors.New("failed to get TLS config for TUIC")

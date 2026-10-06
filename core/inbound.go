@@ -145,8 +145,9 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 			in.StreamSetting.TLSSettings = &coreConf.TLSConfig{
 				Certs: []*coreConf.TLSCertConfig{
 					{
-						CertFile: nodeInfo.Common.CertInfo.CertFile,
-						KeyFile:  nodeInfo.Common.CertInfo.KeyFile,
+						CertFile:     nodeInfo.Common.CertInfo.CertFile,
+						KeyFile:      nodeInfo.Common.CertInfo.KeyFile,
+						OcspStapling: 3600,
 						// v2node owns certificate refresh through a cancellable task.
 						OneTimeLoading: true,
 					},

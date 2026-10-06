@@ -240,3 +240,5 @@ require (
 )
 
 replace github.com/xtls/xray-core v1.260728.0 => ./third_party/xray-core
+
+replace github.com/sagernet/sing-shadowsocks v0.2.7 => ./third_party/sing-shadowsocks

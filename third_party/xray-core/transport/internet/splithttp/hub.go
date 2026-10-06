@@ -459,7 +459,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 		sessions:       sync.Map{},
 		socketSettings: streamSettings.SocketSettings,
 	}
-	tlsConfig := getTLSConfig(streamSettings)
+	tlsConfig := getTLSConfig(ctx, streamSettings)
 	l.isH3 = len(tlsConfig.NextProtos) == 1 && tlsConfig.NextProtos[0] == "h3"
 
 	var err error
@@ -555,7 +555,7 @@ func ListenXH(ctx context.Context, address net.Address, port net.Port, streamSet
 	// tcp/unix (h1/h2)
 	if l.listener != nil {
 		if config := tls.ConfigFromStreamSettings(streamSettings); config != nil {
-			if tlsConfig := config.GetTLSConfig(); tlsConfig != nil {
+			if tlsConfig := config.GetTLSConfigWithContext(ctx); tlsConfig != nil {
 				l.listener = gotls.NewListener(l.listener, tlsConfig)
 			}
 		}
@@ -606,12 +606,12 @@ func (ln *Listener) Close() error {
 	return errors.New("listener does not have an HTTP/3 server or a net.listener")
 }
 
-func getTLSConfig(streamSettings *internet.MemoryStreamConfig) *gotls.Config {
+func getTLSConfig(ctx context.Context, streamSettings *internet.MemoryStreamConfig) *gotls.Config {
 	config := tls.ConfigFromStreamSettings(streamSettings)
 	if config == nil {
 		return &gotls.Config{}
 	}
-	return config.GetTLSConfig()
+	return config.GetTLSConfigWithContext(ctx)
 }
 
 func init() {

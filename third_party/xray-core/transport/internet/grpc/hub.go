@@ -85,7 +85,7 @@ func Listen(ctx context.Context, address net.Address, port net.Port, settings *i
 	var s *grpc.Server
 	if config != nil {
 		// gRPC server may silently ignore TLS errors
-		options = append(options, grpc.Creds(credentials.NewTLS(config.GetTLSConfig(tls.WithNextProto("h2")))))
+		options = append(options, grpc.Creds(credentials.NewTLS(config.GetTLSConfigWithContext(ctx, tls.WithNextProto("h2")))))
 	}
 	if grpcSettings.IdleTimeout > 0 || grpcSettings.HealthCheckTimeout > 0 {
 		options = append(options, grpc.KeepaliveParams(keepalive.ServerParameters{

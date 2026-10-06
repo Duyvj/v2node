@@ -50,7 +50,8 @@ type tcpWorker struct {
 
 	hub internet.Listener
 
-	ctx context.Context
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func getTProxyType(s *internet.MemoryStreamConfig) internet.SocketConfig_TProxyMode {
@@ -134,7 +135,8 @@ func (w *tcpWorker) Proxy() proxy.Inbound {
 }
 
 func (w *tcpWorker) Start() error {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(w.ctx)
+	w.cancel = cancel
 
 	if v, ok := w.proxy.(*hysteria_proxy.Server); ok {
 		ctx = hysteria.ContextWithValidator(ctx, v.HysteriaInboundValidator())
@@ -149,6 +151,7 @@ func (w *tcpWorker) Start() error {
 		go w.callback(conn)
 	})
 	if err != nil {
+		cancel()
 		return errors.New("failed to listen TCP on ", w.port).AtWarning().Base(err)
 	}
 	w.hub = hub
@@ -156,6 +159,9 @@ func (w *tcpWorker) Start() error {
 }
 
 func (w *tcpWorker) Close() error {
+	if w.cancel != nil {
+		w.cancel()
+	}
 	var errs []interface{}
 	if w.hub != nil {
 		if err := common.Close(w.hub); err != nil {

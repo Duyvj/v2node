@@ -87,7 +87,8 @@ type Instance struct {
 	running                    bool
 	resolveLock                sync.Mutex
 
-	ctx context.Context
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // Instance state
@@ -165,21 +166,17 @@ func OptionalFeatures(ctx context.Context, callback interface{}) error {
 // The instance is not started at this point.
 // To ensure Xray instance works properly, the config must contain one Dispatcher, one InboundHandlerManager and one OutboundHandlerManager. Other features are optional.
 func New(config *Config) (*Instance, error) {
-	server := &Instance{ctx: context.Background()}
-
-	done, err := initInstanceWithConfig(config, server)
-	if done {
-		return nil, err
-	}
-
-	return server, nil
+	return NewWithContext(context.Background(), config)
 }
 
 func NewWithContext(ctx context.Context, config *Config) (*Instance, error) {
-	server := &Instance{ctx: ctx}
+	ctx, cancel := context.WithCancel(ctx)
+	server := &Instance{ctx: ctx, cancel: cancel}
 
 	done, err := initInstanceWithConfig(config, server)
 	if done {
+		cancel()
+		_ = server.Close()
 		return nil, err
 	}
 
@@ -263,6 +260,9 @@ func (s *Instance) Close() error {
 	defer s.statusLock.Unlock()
 
 	s.running = false
+	if s.cancel != nil {
+		s.cancel()
+	}
 
 	var errs []interface{}
 	for _, f := range s.features {
