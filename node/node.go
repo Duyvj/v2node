@@ -24,6 +24,7 @@ func New(nodes []conf.NodeConfig) (*Node, error) {
 	for i, node := range nodes {
 		p, err := panel.New(&node)
 		if err != nil {
+			_ = n.Close()
 			return nil, err
 		}
 		info, err := p.GetNodeInfo(context.Background())

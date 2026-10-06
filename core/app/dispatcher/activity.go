@@ -20,7 +20,7 @@ func (d *DefaultDispatcher) linkManager(user string) *LinkManager {
 	if v, ok := d.LinkManagers.Load(user); ok {
 		return v.(*LinkManager)
 	}
-	v, _ := d.LinkManagers.LoadOrStore(user, &LinkManager{links: make(map[*ManagedWriter]buf.Reader)})
+	v, _ := d.LinkManagers.LoadOrStore(user, &LinkManager{})
 	return v.(*LinkManager)
 }
 

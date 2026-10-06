@@ -156,16 +156,12 @@ func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
 			return nil, fmt.Errorf("invalid alive count")
 		}
 	}
-	c.AliveMap = &body
 	return body.Alive, nil
 }
 func (c *Client) ReportUserTraffic(ctx context.Context, traffic []UserTraffic) error {
-	data := make(map[int][]int64, len(traffic))
+	data := make(map[int][2]int64, len(traffic))
 	for _, v := range traffic {
 		n := data[v.UID]
-		if n == nil {
-			n = make([]int64, 2)
-		}
 		n[0] += v.Upload
 		n[1] += v.Download
 		data[v.UID] = n

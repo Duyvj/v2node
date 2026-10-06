@@ -26,7 +26,6 @@ type Client struct {
 	userEtag         string
 	responseBodyHash string
 	UserList         *UserListBody
-	AliveMap         *AliveMap
 }
 
 func New(c *conf.NodeConfig) (*Client, error) {
@@ -70,7 +69,6 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		APIHost:      c.APIHost,
 		NodeId:       c.NodeID,
 		UserList:     &UserListBody{},
-		AliveMap:     &AliveMap{},
 	}, nil
 }
 

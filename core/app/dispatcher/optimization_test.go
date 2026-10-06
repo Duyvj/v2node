@@ -57,3 +57,27 @@ func TestConcurrentInitializationUsesSharedState(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestClosedConnectionBurstReleasesLinkMap(t *testing.T) {
+	m := &LinkManager{}
+	writers := make([]*ManagedWriter, 4096)
+	for i := range writers {
+		writers[i] = &ManagedWriter{manager: m}
+		if !m.AddLink(writers[i], nil) {
+			t.Fatal("connection not registered")
+		}
+	}
+	for _, writer := range writers {
+		m.RemoveWriter(writer)
+	}
+	if m.links != nil {
+		t.Fatal("idle user retained the burst-sized connection map")
+	}
+	if !m.AddLink(&ManagedWriter{manager: m}, nil) {
+		t.Fatal("idle user cannot open another connection")
+	}
+	m.CloseAll()
+	if m.links != nil {
+		t.Fatal("removed user retained connection map")
+	}
+}

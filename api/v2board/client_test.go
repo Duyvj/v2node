@@ -2,6 +2,7 @@ package panel
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/wyx2685/v2node/conf"
 	"net/http"
@@ -100,5 +101,22 @@ func TestInvalidIntervalsUseSafeDefault(t *testing.T) {
 		if intervalToTime(v).Seconds() != 60 {
 			t.Fatalf("unsafe interval %v", v)
 		}
+	}
+}
+
+func TestTrafficReportAggregatesAndPreservesArrayShape(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var body map[string][]int64
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		if len(body) != 1 || len(body["7"]) != 2 || body["7"][0] != 40 || body["7"][1] != 60 {
+			t.Error("wrong traffic payload", body)
+		}
+	})
+	if err := c.ReportUserTraffic(context.Background(), []UserTraffic{{UID: 7, Upload: 10, Download: 20}, {UID: 7, Upload: 30, Download: 40}}); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -2,6 +2,8 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
+	"google.golang.org/protobuf/proto"
 	"net"
 	"strings"
 
@@ -33,15 +35,6 @@ func hasPublicIPv6() bool {
 	return false
 }
 
-func hasOutboundWithTag(list []*core.OutboundHandlerConfig, tag string) bool {
-	for _, o := range list {
-		if o != nil && o.Tag == tag {
-			return true
-		}
-	}
-	return false
-}
-
 func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, error) {
 	//dns
 	queryStrategy := "UseIPv4v6"
@@ -59,13 +52,23 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 		QueryStrategy: queryStrategy,
 	}
 	//outbound
-	defaultoutbound, _ := buildDefaultOutbound()
+	defaultoutbound, err := buildDefaultOutbound()
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	coreOutboundConfig := append([]*core.OutboundHandlerConfig{}, defaultoutbound)
-	block, _ := buildBlockOutbound()
+	block, err := buildBlockOutbound()
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	coreOutboundConfig = append(coreOutboundConfig, block)
-	dns, _ := buildDnsOutbound()
+	dns, err := buildDnsOutbound()
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	coreOutboundConfig = append(coreOutboundConfig, dns)
 
+	outboundByTag := map[string]*core.OutboundHandlerConfig{defaultoutbound.Tag: defaultoutbound, block.Tag: block, dns.Tag: dns}
 	//route
 	domainStrategy := "AsIs"
 	dnsRule, _ := json.Marshal(map[string]interface{}{
@@ -79,6 +82,9 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 	}
 
 	for _, info := range infos {
+		if info == nil || info.Common == nil {
+			return nil, nil, nil, fmt.Errorf("missing route node configuration")
+		}
 		if len(info.Common.Routes) == 0 {
 			continue
 		}
@@ -142,87 +148,43 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 					continue
 				}
 				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-			case "route":
+			case "route", "route_ip", "default_out":
 				if route.ActionValue == nil {
-					continue
+					return nil, nil, nil, fmt.Errorf("route %d: missing outbound configuration", route.Id)
 				}
 				outbound := &coreConf.OutboundDetourConfig{}
-				err := json.Unmarshal([]byte(*route.ActionValue), outbound)
-				if err != nil {
-					continue
+				if err := json.Unmarshal([]byte(*route.ActionValue), outbound); err != nil {
+					return nil, nil, nil, fmt.Errorf("route %d: invalid outbound JSON: %w", route.Id, err)
 				}
-				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
-					"domain":      route.Match,
-					"outboundTag": outbound.Tag,
+				if outbound.Tag == "" {
+					return nil, nil, nil, fmt.Errorf("route %d: outbound tag is required", route.Id)
+				}
+				built, err := outbound.Build()
+				if err != nil {
+					return nil, nil, nil, fmt.Errorf("route %d: build outbound %s: %w", route.Id, outbound.Tag, err)
+				}
+				if existing := outboundByTag[outbound.Tag]; existing != nil {
+					if !proto.Equal(existing, built) {
+						return nil, nil, nil, fmt.Errorf("route %d: conflicting outbound tag %s", route.Id, outbound.Tag)
+					}
+				} else {
+					outboundByTag[outbound.Tag] = built
+					coreOutboundConfig = append(coreOutboundConfig, built)
+				}
+				rule := map[string]any{"inboundTag": info.Tag, "outboundTag": outbound.Tag}
+				switch route.Action {
+				case "route":
+					rule["domain"] = route.Match
+				case "route_ip":
+					rule["ip"] = route.Match
+				case "default_out":
+					rule["network"] = "tcp,udp"
 				}
 				rawRule, err := json.Marshal(rule)
 				if err != nil {
-					continue
+					return nil, nil, nil, err
 				}
 				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-				if hasOutboundWithTag(coreOutboundConfig, outbound.Tag) {
-					continue
-				}
-				custom_outbound, err := outbound.Build()
-				if err != nil {
-					continue
-				}
-				coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
-			case "route_ip":
-				if route.ActionValue == nil {
-					continue
-				}
-				outbound := &coreConf.OutboundDetourConfig{}
-				err := json.Unmarshal([]byte(*route.ActionValue), outbound)
-				if err != nil {
-					continue
-				}
-				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
-					"ip":          route.Match,
-					"outboundTag": outbound.Tag,
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-				if hasOutboundWithTag(coreOutboundConfig, outbound.Tag) {
-					continue
-				}
-				custom_outbound, err := outbound.Build()
-				if err != nil {
-					continue
-				}
-				coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
-			case "default_out":
-				if route.ActionValue == nil {
-					continue
-				}
-				outbound := &coreConf.OutboundDetourConfig{}
-				err := json.Unmarshal([]byte(*route.ActionValue), outbound)
-				if err != nil {
-					continue
-				}
-				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
-					"network":     "tcp,udp",
-					"outboundTag": outbound.Tag,
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-				if hasOutboundWithTag(coreOutboundConfig, outbound.Tag) {
-					continue
-				}
-				custom_outbound, err := outbound.Build()
-				if err != nil {
-					continue
-				}
-				coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
 			default:
 				continue
 			}

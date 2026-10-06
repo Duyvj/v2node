@@ -194,11 +194,7 @@ func (s *userState) updateBucket(now time.Time) {
 		return
 	}
 	s.bucketRate = value
-	if s.bucket != nil {
-		s.bucket.Update(value)
-	} else if value > 0 {
-		s.bucket = rate.NewDynamicBucket(value)
-	}
+	s.bucket.Update(value)
 }
 func (s *userState) prune(now int64) {
 	for ip, seen := range s.ips {

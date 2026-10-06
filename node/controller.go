@@ -90,6 +90,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 	// add limiter
 	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap)
 	c.limiter = l
+	c.aliveMap = nil // the limiter owns a copy; do not retain the initial snapshot
 	if node.Security == panel.Tls {
 		err = c.requestCert()
 		if err != nil {

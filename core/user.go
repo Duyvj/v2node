@@ -117,58 +117,112 @@ func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserT
 }
 
 func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
-	v.users.mapLock.Lock()
-	defer v.users.mapLock.Unlock()
-	for i := range p.Users {
-		v.users.uidMap[format.UserTag(p.Tag, p.Users[i].Uuid)] = p.Users[i].Id
-	}
-	var users []*protocol.User
-	switch p.NodeInfo.Type {
-	case "vmess":
-		users = buildVmessUsers(p.Tag, p.Users)
-	case "vless":
-		users = buildVlessUsers(p.Tag, p.Users, p.Common.Flow)
-	case "trojan":
-		users = buildTrojanUsers(p.Tag, p.Users)
-	case "shadowsocks":
-		users = buildSSUsers(p.Tag,
-			p.Users,
-			p.Common.Cipher,
-			p.Common.ServerKey)
-	case "hysteria2":
-		users = buildHysteria2Users(p.Tag, p.Users)
-	case "tuic":
-		users = buildTuicUsers(p.Tag, p.Users)
-	case "anytls":
-		users = buildAnyTLSUsers(p.Tag, p.Users)
-	default:
-		return 0, fmt.Errorf("unsupported node type: %s", p.NodeInfo.Type)
+	if p == nil || p.NodeInfo == nil || p.Common == nil {
+		return 0, fmt.Errorf("missing user node configuration")
 	}
 	man, err := v.GetUserManager(p.Tag)
 	if err != nil {
-		return 0, fmt.Errorf("get user manager error: %s", err)
+		return 0, fmt.Errorf("get user manager: %w", err)
 	}
-	for _, u := range users {
-		mUser, err := u.ToMemoryUser()
+	v.users.mapLock.Lock()
+	defer v.users.mapLock.Unlock()
+	// Convert one account at a time: do not retain a second complete user list.
+	// Roll back a partially rejected batch so a panel retry can apply it again.
+	defer func() {
+		if err == nil {
+			return
+		}
+		for i := 0; i < added; i++ {
+			key := format.UserTag(p.Tag, p.Users[i].Uuid)
+			if removeErr := man.RemoveUser(context.Background(), key); removeErr != nil {
+				err = fmt.Errorf("%w; rollback user: %v", err, removeErr)
+			}
+			delete(v.users.uidMap, key)
+		}
+		added = 0
+	}()
+	for i := range p.Users {
+		key := format.UserTag(p.Tag, p.Users[i].Uuid)
+		if _, exists := v.users.uidMap[key]; exists {
+			return added, fmt.Errorf("user credential already registered")
+		}
+		var u *protocol.User
+		u, err = buildUser(p, &p.Users[i])
 		if err != nil {
-			return 0, err
+			return added, err
+		}
+		var memoryUser *protocol.MemoryUser
+		memoryUser, err = u.ToMemoryUser()
+		if err != nil {
+			return added, err
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err = man.AddUser(ctx, mUser)
+		err = man.AddUser(ctx, memoryUser)
 		cancel()
 		if err != nil {
-			return 0, err
+			return added, err
+		}
+		v.users.uidMap[key] = p.Users[i].Id
+		added++
+	}
+	// The pinned AnyTLS core applies a batch asynchronously after a debounce.
+	// Report success only once its published authentication snapshot is ready.
+	if p.Type == "anytls" && added > 0 {
+		key := format.UserTag(p.Tag, p.Users[added-1].Uuid)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for man.GetUser(ctx, key) == nil {
+			select {
+			case <-ctx.Done():
+				return added, fmt.Errorf("activate anytls users: %w", ctx.Err())
+			case <-ticker.C:
+			}
 		}
 	}
-	return len(users), nil
+	return added, nil
 }
 
-func buildVmessUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {
-	users = make([]*protocol.User, len(userInfo))
-	for i, user := range userInfo {
-		users[i] = buildVmessUser(tag, &user)
+func buildUser(p *AddUsersParams, u *panel.UserInfo) (*protocol.User, error) {
+	switch p.Type {
+	case "vmess":
+		return buildVmessUser(p.Tag, u), nil
+	case "vless":
+		return buildVlessUser(p.Tag, u, p.Common.Flow), nil
+	case "trojan":
+		return buildTrojanUser(p.Tag, u), nil
+	case "shadowsocks":
+		if p.Common.ServerKey != "" {
+			size, err := shadowsocksKeyLength(p.Common.Cipher)
+			if err != nil {
+				return nil, err
+			}
+			if len(u.Uuid) < size {
+				return nil, fmt.Errorf("shadowsocks 2022 credential must contain at least %d bytes", size)
+			}
+		}
+		return buildSSUser(p.Tag, u, p.Common.Cipher, p.Common.ServerKey), nil
+	case "hysteria2":
+		return buildHysteria2User(p.Tag, u), nil
+	case "tuic":
+		return buildTuicUser(p.Tag, u), nil
+	case "anytls":
+		return buildAnyTLSUser(p.Tag, u), nil
+	default:
+		return nil, fmt.Errorf("unsupported node type: %s", p.Type)
 	}
-	return users
+}
+
+func shadowsocksKeyLength(cipher string) (int, error) {
+	switch cipher {
+	case "2022-blake3-aes-128-gcm":
+		return 16, nil
+	case "2022-blake3-aes-256-gcm":
+		return 32, nil
+	default:
+		return 0, fmt.Errorf("unsupported shadowsocks 2022 multi-user cipher: %s", cipher)
+	}
 }
 
 func buildVmessUser(tag string, userInfo *panel.UserInfo) (user *protocol.User) {
@@ -183,14 +237,6 @@ func buildVmessUser(tag string, userInfo *panel.UserInfo) (user *protocol.User) 
 	}
 }
 
-func buildVlessUsers(tag string, userInfo []panel.UserInfo, flow string) (users []*protocol.User) {
-	users = make([]*protocol.User, len(userInfo))
-	for i := range userInfo {
-		users[i] = buildVlessUser(tag, &(userInfo)[i], flow)
-	}
-	return users
-}
-
 func buildVlessUser(tag string, userInfo *panel.UserInfo, flow string) (user *protocol.User) {
 	vlessAccount := &vless.Account{
 		Id: userInfo.Uuid,
@@ -203,14 +249,6 @@ func buildVlessUser(tag string, userInfo *panel.UserInfo, flow string) (user *pr
 	}
 }
 
-func buildTrojanUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {
-	users = make([]*protocol.User, len(userInfo))
-	for i := range userInfo {
-		users[i] = buildTrojanUser(tag, &(userInfo)[i])
-	}
-	return users
-}
-
 func buildTrojanUser(tag string, userInfo *panel.UserInfo) (user *protocol.User) {
 	trojanAccount := &trojan.Account{
 		Password: userInfo.Uuid,
@@ -220,14 +258,6 @@ func buildTrojanUser(tag string, userInfo *panel.UserInfo) (user *protocol.User)
 		Email:   format.UserTag(tag, userInfo.Uuid),
 		Account: serial.ToTypedMessage(trojanAccount),
 	}
-}
-
-func buildSSUsers(tag string, userInfo []panel.UserInfo, cypher string, serverKey string) (users []*protocol.User) {
-	users = make([]*protocol.User, len(userInfo))
-	for i := range userInfo {
-		users[i] = buildSSUser(tag, &userInfo[i], cypher, serverKey)
-	}
-	return users
 }
 
 func buildSSUser(tag string, userInfo *panel.UserInfo, cypher string, serverKey string) (user *protocol.User) {
@@ -242,15 +272,7 @@ func buildSSUser(tag string, userInfo *panel.UserInfo, cypher string, serverKey 
 			Account: serial.ToTypedMessage(ssAccount),
 		}
 	} else {
-		var keyLength int
-		switch cypher {
-		case "2022-blake3-aes-128-gcm":
-			keyLength = 16
-		case "2022-blake3-aes-256-gcm":
-			keyLength = 32
-		case "2022-blake3-chacha20-poly1305":
-			keyLength = 32
-		}
+		keyLength, _ := shadowsocksKeyLength(cypher)
 		ssAccount := &shadowsocks_2022.Account{
 			Key: base64.StdEncoding.EncodeToString([]byte(userInfo.Uuid[:keyLength])),
 		}
@@ -270,17 +292,11 @@ func getCipherFromString(c string) shadowsocks.CipherType {
 		return shadowsocks.CipherType_AES_256_GCM
 	case "chacha20-poly1305", "aead_chacha20_poly1305", "chacha20-ietf-poly1305":
 		return shadowsocks.CipherType_CHACHA20_POLY1305
+	case "xchacha20-poly1305", "aead_xchacha20_poly1305", "xchacha20-ietf-poly1305":
+		return shadowsocks.CipherType_XCHACHA20_POLY1305
 	default:
 		return shadowsocks.CipherType_UNKNOWN
 	}
-}
-
-func buildHysteria2Users(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {
-	users = make([]*protocol.User, len(userInfo))
-	for i := range userInfo {
-		users[i] = buildHysteria2User(tag, &userInfo[i])
-	}
-	return users
 }
 
 func buildHysteria2User(tag string, userInfo *panel.UserInfo) (user *protocol.User) {
@@ -294,14 +310,6 @@ func buildHysteria2User(tag string, userInfo *panel.UserInfo) (user *protocol.Us
 	}
 }
 
-func buildTuicUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {
-	users = make([]*protocol.User, len(userInfo))
-	for i := range userInfo {
-		users[i] = buildTuicUser(tag, &userInfo[i])
-	}
-	return users
-}
-
 func buildTuicUser(tag string, userInfo *panel.UserInfo) (user *protocol.User) {
 	tuicAccount := &tuic.Account{
 		Uuid:     userInfo.Uuid,
@@ -312,14 +320,6 @@ func buildTuicUser(tag string, userInfo *panel.UserInfo) (user *protocol.User) {
 		Email:   format.UserTag(tag, userInfo.Uuid),
 		Account: serial.ToTypedMessage(tuicAccount),
 	}
-}
-
-func buildAnyTLSUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {
-	users = make([]*protocol.User, len(userInfo))
-	for i := range userInfo {
-		users[i] = buildAnyTLSUser(tag, &userInfo[i])
-	}
-	return users
 }
 
 func buildAnyTLSUser(tag string, userInfo *panel.UserInfo) (user *protocol.User) {

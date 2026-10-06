@@ -31,6 +31,9 @@ func (m *LinkManager) AddLink(writer *ManagedWriter, reader buf.Reader) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.closed {
+		if m.links == nil {
+			m.links = make(map[*ManagedWriter]buf.Reader)
+		}
 		m.links[writer] = reader
 		return true
 	}
@@ -42,6 +45,9 @@ func (m *LinkManager) RemoveWriter(writer *ManagedWriter) {
 	defer m.mu.Unlock()
 	if !m.closed {
 		delete(m.links, writer)
+		if len(m.links) == 0 {
+			m.links = nil
+		}
 	}
 }
 
@@ -54,7 +60,7 @@ func (m *LinkManager) CloseAll() {
 	m.closed = true
 
 	links := m.links
-	m.links = make(map[*ManagedWriter]buf.Reader)
+	m.links = nil
 	m.mu.Unlock()
 
 	for w, r := range links {

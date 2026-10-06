@@ -27,14 +27,15 @@ type AddUsersParams struct {
 }
 
 type V2Core struct {
-	Config     *conf.Conf
-	ReloadCh   chan struct{}
-	access     sync.Mutex
-	Server     *core.Instance
-	users      *UserMap
-	ihm        inbound.Manager
-	ohm        outbound.Manager
-	dispatcher *dispatcher.DefaultDispatcher
+	Config       *conf.Conf
+	ReloadCh     chan struct{}
+	access       sync.Mutex
+	Server       *core.Instance
+	users        *UserMap
+	certificates certificateMonitor
+	ihm          inbound.Manager
+	ohm          outbound.Manager
+	dispatcher   *dispatcher.DefaultDispatcher
 }
 
 type UserMap struct {
@@ -61,6 +62,8 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 		return err
 	}
 	if err := v.Server.Start(); err != nil {
+		_ = v.Server.Close()
+		v.Server = nil
 		return err
 	}
 	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
@@ -74,6 +77,9 @@ func (v *V2Core) Close() error {
 	defer v.access.Unlock()
 	if v.Server == nil {
 		return nil
+	}
+	if err := v.closeCertificateMonitor(); err != nil {
+		return err
 	}
 	v.ihm = nil
 	v.ohm = nil

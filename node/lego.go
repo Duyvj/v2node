@@ -158,7 +158,7 @@ func (l *Lego) writeCert(certificates *certificate.Resource) error {
 	if err != nil {
 		return fmt.Errorf("check path error: %s", err)
 	}
-	err = os.WriteFile(l.parseParams(l.config.KeyFile), certificates.PrivateKey, 0644)
+	err = os.WriteFile(l.parseParams(l.config.KeyFile), certificates.PrivateKey, 0600)
 	if err != nil {
 		return err
 	}
@@ -248,6 +248,7 @@ func (u *User) Save(path string) error {
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 	err = json.NewEncoder(f).Encode(u)
 	if err != nil {
 		return fmt.Errorf("marshal json error: %s", err)
@@ -258,6 +259,9 @@ func (u *User) Save(path string) error {
 
 func (u *User) DecodePrivate(pemEncodedPriv string) (*ecdsa.PrivateKey, error) {
 	blockPriv, _ := pem.Decode([]byte(pemEncodedPriv))
+	if blockPriv == nil {
+		return nil, fmt.Errorf("invalid PEM private key")
+	}
 	x509EncodedPriv := blockPriv.Bytes
 	privateKey, err := x509.ParseECPrivateKey(x509EncodedPriv)
 	return privateKey, err

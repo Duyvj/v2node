@@ -15,10 +15,17 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo) error {
 	if err != nil {
 		return fmt.Errorf("add inbound error: %s", err)
 	}
+	if err := v.watchCertificate(tag, info); err != nil {
+		_ = v.removeInbound(tag)
+		return err
+	}
 	return nil
 }
 
 func (v *V2Core) DelNode(tag string) error {
+	v.certificates.mu.Lock()
+	delete(v.certificates.files, tag)
+	v.certificates.mu.Unlock()
 	err := v.removeInbound(tag)
 	if err != nil {
 		return fmt.Errorf("remove in error: %s", err)
