@@ -169,6 +169,11 @@ func protocolNetworkSettings(network string) json.RawMessage {
 
 func protocolClient(t *testing.T, info *panel.NodeInfo) *xcore.Instance {
 	t.Helper()
+	return protocolClientFrom(t, info, "")
+}
+
+func protocolClientFrom(t *testing.T, info *panel.NodeInfo, sourceIP string) *xcore.Instance {
+	t.Helper()
 	cm := info.Common
 	stream := map[string]any{"network": cm.Network}
 	switch cm.Network {
@@ -276,7 +281,11 @@ func protocolClient(t *testing.T, info *panel.NodeInfo) *xcore.Instance {
 		protocol = "freedom"
 		settings = map[string]any{"finalRules": []any{map[string]any{"action": "allow", "ip": []string{"127.0.0.1/32"}}}}
 	}
-	raw, err := json.Marshal(map[string]any{"log": map[string]any{"loglevel": "error", "access": "none"}, "outbounds": []any{map[string]any{"protocol": protocol, "settings": settings, "streamSettings": stream}}})
+	outbound := map[string]any{"protocol": protocol, "settings": settings, "streamSettings": stream}
+	if sourceIP != "" {
+		outbound["sendThrough"] = sourceIP
+	}
+	raw, err := json.Marshal(map[string]any{"log": map[string]any{"loglevel": "error", "access": "none"}, "outbounds": []any{outbound}})
 	if err != nil {
 		t.Fatal(err)
 	}

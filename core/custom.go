@@ -1,9 +1,9 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"google.golang.org/protobuf/proto"
 	"net"
 	"strings"
 
@@ -13,7 +13,33 @@ import (
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	coreConf "github.com/xtls/xray-core/infra/conf"
+	"google.golang.org/protobuf/proto"
 )
+
+func parseRouteOutbounds(value string) ([]*coreConf.OutboundDetourConfig, error) {
+	raw := bytes.TrimSpace([]byte(value))
+	var outbounds []*coreConf.OutboundDetourConfig
+	if len(raw) > 0 && raw[0] == '[' {
+		if err := json.Unmarshal(raw, &outbounds); err != nil {
+			return nil, err
+		}
+	} else {
+		var outbound *coreConf.OutboundDetourConfig
+		if err := json.Unmarshal(raw, &outbound); err != nil {
+			return nil, err
+		}
+		outbounds = []*coreConf.OutboundDetourConfig{outbound}
+	}
+	if len(outbounds) == 0 {
+		return nil, fmt.Errorf("outbound array is empty")
+	}
+	for i, outbound := range outbounds {
+		if outbound == nil || outbound.Tag == "" {
+			return nil, fmt.Errorf("outbound %d: tag is required", i)
+		}
+	}
+	return outbounds, nil
+}
 
 // hasPublicIPv6 checks if the machine has a public IPv6 address
 func hasPublicIPv6() bool {
@@ -152,26 +178,27 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				if route.ActionValue == nil {
 					return nil, nil, nil, fmt.Errorf("route %d: missing outbound configuration", route.Id)
 				}
-				outbound := &coreConf.OutboundDetourConfig{}
-				if err := json.Unmarshal([]byte(*route.ActionValue), outbound); err != nil {
+				outbounds, err := parseRouteOutbounds(*route.ActionValue)
+				if err != nil {
 					return nil, nil, nil, fmt.Errorf("route %d: invalid outbound JSON: %w", route.Id, err)
 				}
-				if outbound.Tag == "" {
-					return nil, nil, nil, fmt.Errorf("route %d: outbound tag is required", route.Id)
-				}
-				built, err := outbound.Build()
-				if err != nil {
-					return nil, nil, nil, fmt.Errorf("route %d: build outbound %s: %w", route.Id, outbound.Tag, err)
-				}
-				if existing := outboundByTag[outbound.Tag]; existing != nil {
-					if !proto.Equal(existing, built) {
-						return nil, nil, nil, fmt.Errorf("route %d: conflicting outbound tag %s", route.Id, outbound.Tag)
+				for _, outbound := range outbounds {
+					built, err := outbound.Build()
+					if err != nil {
+						return nil, nil, nil, fmt.Errorf("route %d: build outbound %s: %w", route.Id, outbound.Tag, err)
 					}
-				} else {
-					outboundByTag[outbound.Tag] = built
-					coreOutboundConfig = append(coreOutboundConfig, built)
+					if existing := outboundByTag[outbound.Tag]; existing != nil {
+						if !proto.Equal(existing, built) {
+							return nil, nil, nil, fmt.Errorf("route %d: conflicting outbound tag %s", route.Id, outbound.Tag)
+						}
+					} else {
+						outboundByTag[outbound.Tag] = built
+						coreOutboundConfig = append(coreOutboundConfig, built)
+					}
 				}
-				rule := map[string]any{"inboundTag": info.Tag, "outboundTag": outbound.Tag}
+				// An array can include helper outbounds referenced by the first one.
+				// Route traffic to its first entry, as with Xray's default outbound.
+				rule := map[string]any{"inboundTag": info.Tag, "outboundTag": outbounds[0].Tag}
 				switch route.Action {
 				case "route":
 					rule["domain"] = route.Match
