@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -135,14 +136,13 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if r.StatusCode() == 304 {
 		return nil, nil
 	}
-	if r.StatusCode() < 200 || r.StatusCode() >= 300 {
-		return nil, fmt.Errorf("node response HTTP %d", r.StatusCode())
-	}
 	hash := sha256.Sum256(r.Body())
 	newBodyHash := hex.EncodeToString(hash[:])
 	if c.responseBodyHash == newBodyHash {
 		return nil, nil
 	}
+	c.responseBodyHash = newBodyHash
+	c.nodeEtag = r.Header().Get("ETag")
 
 	if r != nil {
 		defer func() {
@@ -205,37 +205,26 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 		cm.CertInfo.TlsKey = cm.TlsSettings.TlsKey
 	}
 	// set interval
-	if cm.BaseConfig == nil {
-		cm.BaseConfig = &BaseConfig{}
-	}
 	node.PushInterval = intervalToTime(cm.BaseConfig.PushInterval)
 	node.PullInterval = intervalToTime(cm.BaseConfig.PullInterval)
 
 	node.Common = cm
-	c.responseBodyHash = newBodyHash
-	c.nodeEtag = r.Header().Get("ETag")
 
 	return node, nil
 }
 
 func intervalToTime(i interface{}) time.Duration {
-	var seconds int64
-	switch v := i.(type) {
-	case int:
-		seconds = int64(v)
-	case int64:
-		seconds = v
-	case string:
-		seconds, _ = strconv.ParseInt(v, 10, 64)
-	case float64:
-		if v > 0 && v <= 86400 {
-			seconds = int64(v)
-		}
+	switch reflect.TypeOf(i).Kind() {
+	case reflect.Int:
+		return time.Duration(i.(int)) * time.Second
+	case reflect.String:
+		i, _ := strconv.Atoi(i.(string))
+		return time.Duration(i) * time.Second
+	case reflect.Float64:
+		return time.Duration(i.(float64)) * time.Second
+	default:
+		return time.Duration(reflect.ValueOf(i).Int()) * time.Second
 	}
-	if seconds < 1 || seconds > 86400 {
-		seconds = 60
-	}
-	return time.Duration(seconds) * time.Second
 }
 
 func (t TlsSettings) EffectiveServerNames() []string {

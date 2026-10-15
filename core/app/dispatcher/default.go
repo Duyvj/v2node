@@ -8,9 +8,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/rate"
 	"github.com/wyx2685/v2node/limiter"
 
+	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
@@ -142,11 +144,7 @@ func (*DefaultDispatcher) Start() error {
 }
 
 // Close implements common.Closable.
-func (d *DefaultDispatcher) Close() error {
-	d.LinkManagers.Range(func(key, value any) bool { value.(*LinkManager).CloseAll(); d.LinkManagers.Delete(key); return true })
-	d.Counter.Range(func(key, _ any) bool { d.Counter.Delete(key); return true })
-	return nil
-}
+func (*DefaultDispatcher) Close() error { return nil }
 
 func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link, *limiter.Limiter, error) {
 	opt := pipe.OptionsFromContext(ctx)
@@ -193,31 +191,45 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			common.Interrupt(inboundLink.Reader)
 			return nil, nil, nil, errors.New("Limited ", user.Email, " by conn or ip")
 		}
-		lm := d.linkManager(user.Email)
+		var lm *LinkManager
+		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
+			lm = &LinkManager{
+				links: make(map[*ManagedWriter]buf.Reader),
+			}
+			d.LinkManagers.Store(user.Email, lm)
+		} else {
+			lm = lmloaded.(*LinkManager)
+		}
 		managedWriter := &ManagedWriter{
 			writer:  uplinkWriter,
 			manager: lm,
 		}
-		if !lm.AddLink(managedWriter, outboundLink.Reader) {
-			common.Close(inboundLink.Writer)
-			common.Close(outboundLink.Writer)
-			common.Interrupt(inboundLink.Reader)
-			common.Interrupt(outboundLink.Reader)
-			return nil, nil, nil, errors.New("user sessions closed")
-		}
+		lm.AddLink(managedWriter, outboundLink.Reader)
 		inboundLink.Writer = managedWriter
 		if w != nil {
 			sessionInbound.CanSpliceCopy = 3
-			inboundLink.Writer = rate.NewRateLimitWriterContext(ctx, inboundLink.Writer, w)
-			outboundLink.Writer = rate.NewRateLimitWriterContext(ctx, outboundLink.Writer, w)
+			inboundLink.Writer = rate.NewRateLimitWriter(inboundLink.Writer, w)
+			outboundLink.Writer = rate.NewRateLimitWriter(outboundLink.Writer, w)
 		}
-		t := d.trafficCounter(sessionInbound.Tag)
-		ip := sessionInbound.Source.Address.IP().String()
-		gate := &activityGate{check: func() bool { _, reject := limit.CheckLimit(user.Email, ip, true); return !reject }}
+		var t *counter.TrafficCounter
+		if c, ok := d.Counter.Load(sessionInbound.Tag); !ok {
+			t = counter.NewTrafficCounter()
+			d.Counter.Store(sessionInbound.Tag, t)
+		} else {
+			t = c.(*counter.TrafficCounter)
+		}
 
 		ts := t.GetCounter(user.Email)
-		inboundLink.Writer = &activityWriter{writer: inboundLink.Writer, counter: &ts.UpCounter, gate: gate}
-		outboundLink.Writer = &activityWriter{writer: outboundLink.Writer, counter: &ts.DownCounter, gate: gate}
+		upcounter := &counter.XrayTrafficCounter{V: &ts.UpCounter}
+		downcounter := &counter.XrayTrafficCounter{V: &ts.DownCounter}
+		inboundLink.Writer = &dispatcher.SizeStatWriter{
+			Counter: upcounter,
+			Writer:  inboundLink.Writer,
+		}
+		outboundLink.Writer = &dispatcher.SizeStatWriter{
+			Counter: downcounter,
+			Writer:  outboundLink.Writer,
+		}
 	}
 
 	return inboundLink, outboundLink, limit, nil
@@ -361,7 +373,15 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			common.Interrupt(outbound.Reader)
 			return errors.New("Limited ", user.Email, " by conn or ip")
 		}
-		lm := d.linkManager(user.Email)
+		var lm *LinkManager
+		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
+			lm = &LinkManager{
+				links: make(map[*ManagedWriter]buf.Reader),
+			}
+			d.LinkManagers.Store(user.Email, lm)
+		} else {
+			lm = lmloaded.(*LinkManager)
+		}
 		managedWriter := &ManagedWriter{
 			writer:  outbound.Writer,
 			manager: lm,
@@ -369,24 +389,27 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		outbound.Writer = managedWriter
 		if w != nil {
 			sessionInbound.CanSpliceCopy = 3
-			outbound.Writer = rate.NewRateLimitWriterContext(ctx, outbound.Writer, w)
+			outbound.Writer = rate.NewRateLimitWriter(outbound.Writer, w)
 		}
-		t := d.trafficCounter(sessionInbound.Tag)
-		ip := sessionInbound.Source.Address.IP().String()
-		gate := &activityGate{check: func() bool { _, reject := limit.CheckLimit(user.Email, ip, true); return !reject }}
+		var t *counter.TrafficCounter
+		if c, ok := d.Counter.Load(sessionInbound.Tag); !ok {
+			t = counter.NewTrafficCounter()
+			d.Counter.Store(sessionInbound.Tag, t)
+		} else {
+			t = c.(*counter.TrafficCounter)
+		}
 
 		ts := t.GetCounter(user.Email)
-		rawReader := outbound.Reader
+		downcounter := &counter.XrayTrafficCounter{V: &ts.DownCounter}
 		outbound.Reader = &CounterReader{
-			Reader:  &buf.TimeoutWrapperReader{Reader: &activityReader{reader: rawReader, gate: gate}},
+			Reader:  &buf.TimeoutWrapperReader{Reader: outbound.Reader},
 			Counter: &ts.UpCounter,
 		}
-		if !lm.AddLink(managedWriter, rawReader) {
-			common.Close(outbound.Writer)
-			common.Interrupt(rawReader)
-			return errors.New("user sessions closed")
+		lm.AddLink(managedWriter, outbound.Reader)
+		outbound.Writer = &dispatcher.SizeStatWriter{
+			Counter: downcounter,
+			Writer:  outbound.Writer,
 		}
-		outbound.Writer = &activityWriter{writer: outbound.Writer, counter: &ts.DownCounter, gate: gate}
 	}
 
 	sniffingRequest := content.SniffingRequest
@@ -426,6 +449,9 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 }
 
 func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, network net.Network) (SniffResult, error) {
+	payload := buf.NewWithSize(32767)
+	defer payload.Release()
+
 	sniffer := NewSniffer(ctx)
 
 	metaresult, metadataErr := sniffer.SniffMetadata(ctx)
@@ -433,8 +459,6 @@ func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, netw
 	if metadataOnly {
 		return metaresult, metadataErr
 	}
-	payload := buf.NewWithSize(32767)
-	defer payload.Release()
 
 	contentResult, contentErr := func() (SniffResult, error) {
 		cacheDeadline := 200 * time.Millisecond

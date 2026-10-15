@@ -1,7 +1,6 @@
 package conf
 
 import (
-	"context"
 	"fmt"
 	"os"
 
@@ -15,8 +14,6 @@ type Conf struct {
 	LogConfig   LogConfig    `mapstructure:"Log"`
 	NodeConfigs []NodeConfig `mapstructure:"Nodes"`
 	PprofPort   int          `mapstructure:"PprofPort"`
-	watchCancel context.CancelFunc
-	watchDone   chan struct{}
 }
 
 type LogConfig struct {
@@ -61,9 +58,6 @@ func (p *Conf) LoadFromPath(filePath string) error {
 		if p.NodeConfigs[i].RetryCount == nil {
 			p.NodeConfigs[i].RetryCount = intPtr(DefaultNodeRetryCount)
 		}
-	}
-	if len(p.NodeConfigs) == 0 {
-		return fmt.Errorf("at least one node is required")
 	}
 	return nil
 }

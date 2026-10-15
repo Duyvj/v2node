@@ -3,7 +3,6 @@ package panel
 import (
 	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 	"time"
 
@@ -17,8 +16,6 @@ import (
 
 type Client struct {
 	client           *resty.Client
-	reportClient     *resty.Client
-	transport        *boundedTransport
 	APIHost          string
 	Token            string
 	NodeId           int
@@ -26,15 +23,11 @@ type Client struct {
 	userEtag         string
 	responseBodyHash string
 	UserList         *UserListBody
+	AliveMap         *AliveMap
 }
 
 func New(c *conf.NodeConfig) (*Client, error) {
 	client := resty.New()
-	transport := &boundedTransport{base: http.DefaultTransport.(*http.Transport).Clone()}
-	transport.base.MaxIdleConns = 32
-	transport.base.MaxIdleConnsPerHost = 4
-	transport.base.MaxConnsPerHost = 8
-	client.SetTransport(transport)
 	retryCount := conf.DefaultNodeRetryCount
 	if c.RetryCount != nil {
 		retryCount = *c.RetryCount
@@ -62,18 +55,11 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		"token":     c.Key,
 	})
 	return &Client{
-		client:       client,
-		reportClient: client.Clone().SetRetryCount(0),
-		transport:    transport,
-		Token:        c.Key,
-		APIHost:      c.APIHost,
-		NodeId:       c.NodeID,
-		UserList:     &UserListBody{},
+		client:   client,
+		Token:    c.Key,
+		APIHost:  c.APIHost,
+		NodeId:   c.NodeID,
+		UserList: &UserListBody{},
+		AliveMap: &AliveMap{},
 	}, nil
-}
-
-func (c *Client) Close() {
-	if c.transport != nil {
-		c.transport.CloseIdleConnections()
-	}
 }

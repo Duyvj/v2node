@@ -1,7 +1,6 @@
 package rate
 
 import (
-	"context"
 	"sync/atomic"
 	"time"
 
@@ -13,7 +12,6 @@ import (
 type Writer struct {
 	writer  buf.Writer
 	limiter *DynamicBucket
-	ctx     context.Context
 }
 
 type DynamicBucket struct {
@@ -21,8 +19,9 @@ type DynamicBucket struct {
 }
 
 func NewDynamicBucket(rate int64) *DynamicBucket {
+	b := ratelimit.NewBucketWithQuantum(time.Second, rate, rate)
 	d := &DynamicBucket{}
-	d.Update(rate)
+	d.v.Store(b)
 	return d
 }
 
@@ -31,23 +30,14 @@ func (d *DynamicBucket) Get() *ratelimit.Bucket {
 }
 
 func (d *DynamicBucket) Update(rate int64) {
-	if rate <= 0 {
-		d.v.Store((*ratelimit.Bucket)(nil))
-		return
-	}
 	newB := ratelimit.NewBucketWithQuantum(time.Second, rate, rate)
 	d.v.Store(newB)
 }
 
 func NewRateLimitWriter(writer buf.Writer, limiter *DynamicBucket) buf.Writer {
-	return NewRateLimitWriterContext(context.Background(), writer, limiter)
-}
-
-func NewRateLimitWriterContext(ctx context.Context, writer buf.Writer, limiter *DynamicBucket) buf.Writer {
 	return &Writer{
 		writer:  writer,
 		limiter: limiter,
-		ctx:     ctx,
 	}
 }
 
@@ -56,22 +46,9 @@ func (w *Writer) Close() error {
 }
 
 func (w *Writer) WriteMultiBuffer(mb buf.MultiBuffer) error {
-	if err := w.ctx.Err(); err != nil {
-		buf.ReleaseMulti(mb)
-		return err
-	}
 	limiter := w.limiter.Get()
 	if limiter != nil {
-		if delay := limiter.Take(int64(mb.Len())); delay > 0 {
-			timer := time.NewTimer(delay)
-			select {
-			case <-w.ctx.Done():
-				timer.Stop()
-				buf.ReleaseMulti(mb)
-				return w.ctx.Err()
-			case <-timer.C:
-			}
-		}
+		limiter.Wait(int64(mb.Len()))
 	}
 	return w.writer.WriteMultiBuffer(mb)
 }

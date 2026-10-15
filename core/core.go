@@ -1,7 +1,6 @@
 package core
 
 import (
-	"fmt"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
@@ -27,15 +26,14 @@ type AddUsersParams struct {
 }
 
 type V2Core struct {
-	Config       *conf.Conf
-	ReloadCh     chan struct{}
-	access       sync.Mutex
-	Server       *core.Instance
-	users        *UserMap
-	certificates certificateMonitor
-	ihm          inbound.Manager
-	ohm          outbound.Manager
-	dispatcher   *dispatcher.DefaultDispatcher
+	Config     *conf.Conf
+	ReloadCh   chan struct{}
+	access     sync.Mutex
+	Server     *core.Instance
+	users      *UserMap
+	ihm        inbound.Manager
+	ohm        outbound.Manager
+	dispatcher *dispatcher.DefaultDispatcher
 }
 
 type UserMap struct {
@@ -56,14 +54,8 @@ func New(config *conf.Conf) *V2Core {
 func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	v.access.Lock()
 	defer v.access.Unlock()
-	var err error
-	v.Server, err = getCore(v.Config, infos)
-	if err != nil {
-		return err
-	}
+	v.Server = getCore(v.Config, infos)
 	if err := v.Server.Start(); err != nil {
-		_ = v.Server.Close()
-		v.Server = nil
 		return err
 	}
 	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
@@ -75,24 +67,18 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 func (v *V2Core) Close() error {
 	v.access.Lock()
 	defer v.access.Unlock()
-	if v.Server == nil {
-		return nil
-	}
-	if err := v.closeCertificateMonitor(); err != nil {
-		return err
-	}
+	v.Config = nil
 	v.ihm = nil
 	v.ohm = nil
 	v.dispatcher = nil
 	err := v.Server.Close()
-	v.Server = nil
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
+func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 	// Log Config
 	coreLogConfig := &coreConf.LogConfig{
 		LogLevel:  c.LogConfig.Level,
@@ -102,19 +88,24 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
 	// Custom config
 	dnsConfig, outBoundConfig, routeConfig, err := GetCustomConfig(infos)
 	if err != nil {
-		return nil, fmt.Errorf("build custom config: %w", err)
+		log.WithField("err", err).Panic("failed to build custom config")
 	}
 	// Inbound config
 	var inBoundConfig []*core.InboundHandlerConfig
 
 	// Policy config
-	levelPolicyConfig := defaultUserPolicy()
+	levelPolicyConfig := &coreConf.Policy{
+		StatsUserUplink:   true,
+		StatsUserDownlink: true,
+		Handshake:         proto.Uint32(4),
+		ConnectionIdle:    proto.Uint32(120),
+		UplinkOnly:        proto.Uint32(2),
+		DownlinkOnly:      proto.Uint32(4),
+		BufferSize:        proto.Int32(128),
+	}
 	corePolicyConfig := &coreConf.PolicyConfig{}
 	corePolicyConfig.Levels = map[uint32]*coreConf.Policy{0: levelPolicyConfig}
-	policyConfig, err := corePolicyConfig.Build()
-	if err != nil {
-		return nil, err
-	}
+	policyConfig, _ := corePolicyConfig.Build()
 	// Build Xray conf
 	config := &core.Config{
 		App: []*serial.TypedMessage{
@@ -132,18 +123,8 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
 	}
 	server, err := core.New(config)
 	if err != nil {
-		return nil, fmt.Errorf("create core: %w", err)
+		log.WithField("err", err).Panic("failed to create instance")
 	}
 	log.Info("Xray Core Version: ", core.Version())
-	return server, nil
-}
-
-func defaultUserPolicy() *coreConf.Policy {
-	return &coreConf.Policy{
-		StatsUserUplink: true, StatsUserDownlink: true,
-		Handshake: proto.Uint32(4), ConnectionIdle: proto.Uint32(120),
-		UplinkOnly: proto.Uint32(2), DownlinkOnly: proto.Uint32(4),
-		// Keep queues bounded per connection without changing idle semantics.
-		BufferSize: proto.Int32(32),
-	}
+	return server
 }

@@ -1,77 +1,52 @@
 package conf
 
 import (
-	"context"
 	"fmt"
-	"path/filepath"
+	"log"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
 
-// Watch signals a serialized reload; it never mutates the running config.
 func (p *Conf) Watch(filePath string, reload func()) error {
-	target, err := filepath.Abs(filePath)
-	if err != nil {
-		return err
-	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return err
+		return fmt.Errorf("new watcher error: %s", err)
 	}
-	if err = watcher.Add(filepath.Dir(target)); err != nil {
-		watcher.Close()
-		return fmt.Errorf("watch config: %w", err)
-	}
-	p.CloseWatch()
-	ctx, cancel := context.WithCancel(context.Background())
-	p.watchCancel = cancel
-	p.watchDone = make(chan struct{})
-	done := p.watchDone
 	go func() {
-		defer close(done)
+		var pre time.Time
 		defer watcher.Close()
-		var timer *time.Timer
-		var tick <-chan time.Time
-		defer func() {
-			if timer != nil {
-				timer.Stop()
-			}
-		}()
 		for {
 			select {
-			case <-ctx.Done():
-				return
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return
-				}
-				if filepath.Clean(event.Name) != target || event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+			case e := <-watcher.Events:
+				if e.Has(fsnotify.Chmod) {
 					continue
 				}
-				if timer == nil {
-					timer = time.NewTimer(500 * time.Millisecond)
-				} else {
-					timer.Reset(500 * time.Millisecond)
+				if pre.Add(10 * time.Second).After(time.Now()) {
+					continue
 				}
-				tick = timer.C
-			case _, ok := <-watcher.Errors:
-				if !ok {
-					return
+				pre = time.Now()
+				go func() {
+					time.Sleep(5 * time.Second)
+					log.Println("config file changed, reloading...")
+					*p = *New()
+					err := p.LoadFromPath(filePath)
+					if err != nil {
+						log.Printf("reload config error: %s", err)
+					}
+					reload()
+					log.Println("reload config success")
+				}()
+			case err := <-watcher.Errors:
+				if err != nil {
+					log.Printf("File watcher error: %s", err)
 				}
-			case <-tick:
-				tick = nil
-				reload()
 			}
 		}
 	}()
-	return nil
-}
-func (p *Conf) CloseWatch() {
-	if p.watchCancel != nil {
-		p.watchCancel()
-		<-p.watchDone
-		p.watchCancel = nil
-		p.watchDone = nil
+	err = watcher.Add(filePath)
+	if err != nil {
+		return fmt.Errorf("watch file error: %s", err)
 	}
+	return nil
 }

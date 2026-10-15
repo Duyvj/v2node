@@ -1,10 +1,10 @@
 # Build go
-FROM golang:1.26.8-alpine AS builder
+FROM golang:1.27.1-alpine AS builder
 WORKDIR /app
 COPY . .
 ENV CGO_ENABLED=0
 RUN GOEXPERIMENT=jsonv2 go mod download
-RUN GOEXPERIMENT=jsonv2 go build -p 2 -trimpath -ldflags="-s -w" -o v2node
+RUN GOEXPERIMENT=jsonv2 go build -v -o v2node
 
 # Release
 FROM  alpine

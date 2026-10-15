@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"runtime/debug"
 	"syscall"
 
 	log "github.com/sirupsen/logrus"
@@ -68,9 +67,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		if err != nil {
 			log.WithField("err", err).Error("Open log file failed, using stdout instead")
 		}
-		if err == nil {
-			log.SetOutput(f)
-		}
+		log.SetOutput(f)
 	}
 	// Enable pprof if configured
 	if c.PprofPort != 0 {
@@ -94,19 +91,18 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	var reloadCh = make(chan struct{}, 1)
 	v2core := core.New(c)
 	v2core.ReloadCh = reloadCh
-	defer func() { _ = nodes.Close(); _ = v2core.Close() }()
 	err = v2core.Start(nodes.NodeInfos)
 	if err != nil {
 		log.WithField("err", err).Error("Start core failed")
 		return
 	}
+	defer v2core.Close()
 	//node
 	err = nodes.Start(c.NodeConfigs, v2core)
 	if err != nil {
 		log.WithField("err", err).Error("Run nodes failed")
 		return
 	}
-	applyRuntimeDefaults()
 	log.Info("Nodes started")
 	if watch {
 		// On file change, just signal reload; do not run reload concurrently here
@@ -121,87 +117,89 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			return
 		}
 	}
-	defer c.CloseWatch()
 	// clear memory
 	runtime.GC()
 
 	osSignals := make(chan os.Signal, 1)
 	signal.Notify(osSignals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(osSignals)
 
 	for {
 		select {
 		case <-osSignals:
 			log.Info("收到退出信号，正在关闭程序...")
-			return
+			os.Exit(0)
 		case <-reloadCh:
 			log.Info("收到重启信号，正在重新加载配置...")
 			if err := reload(config, &nodes, &v2core); err != nil {
-				log.WithError(err).Error("Reload rejected or rolled back")
-				continue
+				log.WithField("err", err).Panic("重启失败")
 			}
 			log.Info("重启成功")
 		}
 	}
 }
 
-// Prepare first, then activate. A failed replacement restores the already
-// prepared previous snapshot without another panel request.
-func reload(path string, nodes **node.Node, v2core **core.V2Core) error {
-	next := conf.New()
-	if err := next.LoadFromPath(path); err != nil {
+func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
+	// Preserve old reload channel so new core continues to receive signals
+	var oldReloadCh chan struct{}
+	if *v2core != nil {
+		oldReloadCh = (*v2core).ReloadCh
+	}
+
+	if err := (*nodes).Close(); err != nil {
 		return err
 	}
-	nextNodes, err := node.New(next.NodeConfigs)
+
+	if err := (*v2core).Close(); err != nil {
+		return err
+	}
+
+	newConf := conf.New()
+	if err := newConf.LoadFromPath(config); err != nil {
+		return err
+	}
+
+	switch newConf.LogConfig.Level {
+	case "debug":
+		log.SetLevel(log.DebugLevel)
+	case "info":
+		log.SetLevel(log.InfoLevel)
+	case "warn", "warning":
+		log.SetLevel(log.WarnLevel)
+	case "error":
+		log.SetLevel(log.ErrorLevel)
+	}
+	if newConf.LogConfig.Output != "" {
+		f, err := os.OpenFile(newConf.LogConfig.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			log.WithField("err", err).Error("Open log file failed, using stdout instead")
+		} else {
+			// 关闭旧的日志文件（如果是文件）
+			if oldWriter, ok := log.StandardLogger().Out.(*os.File); ok && oldWriter != os.Stdout && oldWriter != os.Stderr {
+				oldWriter.Close()
+			}
+			log.SetOutput(f)
+		}
+	}
+
+	newNodes, err := node.New(newConf.NodeConfigs)
 	if err != nil {
 		return err
 	}
-	previousNodes, previousCore := *nodes, *v2core
-	if err := previousNodes.Close(); err != nil {
-		_ = nextNodes.Close()
+
+	newCore := core.New(newConf)
+	// Reattach reload channel
+	newCore.ReloadCh = oldReloadCh
+	if err := newCore.Start(newNodes.NodeInfos); err != nil {
 		return err
 	}
-	if err := previousCore.Close(); err != nil {
-		_ = nextNodes.Close()
+
+	if err := newNodes.Start(newConf.NodeConfigs, newCore); err != nil {
 		return err
 	}
-	candidate := core.New(next)
-	candidate.ReloadCh = previousCore.ReloadCh
-	startErr := candidate.Start(nextNodes.NodeInfos)
-	if startErr == nil {
-		startErr = nextNodes.Start(next.NodeConfigs, candidate)
-	}
-	if startErr != nil {
-		_ = nextNodes.Close()
-		_ = candidate.Close()
-		restored := core.New(previousCore.Config)
-		restored.ReloadCh = previousCore.ReloadCh
-		restoreErr := restored.Start(previousNodes.NodeInfos)
-		if restoreErr == nil {
-			restoreErr = previousNodes.Start(previousCore.Config.NodeConfigs, restored)
-		}
-		if restoreErr != nil {
-			_ = previousNodes.Close()
-			_ = restored.Close()
-			return fmt.Errorf("reload failed: %v; rollback failed: %w", startErr, restoreErr)
-		}
-		*nodes = previousNodes
-		*v2core = restored
-		return fmt.Errorf("previous runtime restored: %w", startErr)
-	}
-	*nodes = nextNodes
-	*v2core = candidate
-	if level, err := log.ParseLevel(next.LogConfig.Level); err == nil {
-		log.SetLevel(level)
-	}
+
+	*nodes = newNodes
+	*v2core = newCore
+
 	runtime.GC()
 	return nil
-}
-
-func applyRuntimeDefaults() {
-	// Respect an explicit operator environment, otherwise use a smaller heap
-	// growth target. Do not impose a fixed memory ceiling on large nodes.
-	if _, configured := os.LookupEnv("GOGC"); !configured {
-		debug.SetGCPercent(80)
-	}
 }

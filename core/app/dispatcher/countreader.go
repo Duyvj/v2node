@@ -1,7 +1,6 @@
 package dispatcher
 
 import (
-	"github.com/xtls/xray-core/common"
 	"sync/atomic"
 	"time"
 
@@ -15,21 +14,24 @@ type CounterReader struct {
 	Counter *atomic.Int64
 }
 
-func (c *CounterReader) ReadMultiBufferTimeout(timeout time.Duration) (buf.MultiBuffer, error) {
-	mb, err := c.Reader.ReadMultiBufferTimeout(timeout)
+func (c *CounterReader) ReadMultiBufferTimeout(time.Duration) (buf.MultiBuffer, error) {
+	mb, err := c.Reader.ReadMultiBufferTimeout(time.Second)
+	if err != nil {
+		return nil, err
+	}
 	if mb.Len() > 0 {
 		c.Counter.Add(int64(mb.Len()))
 	}
-	return mb, err
+	return mb, nil
 }
 
 func (c *CounterReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 	mb, err := c.Reader.ReadMultiBuffer()
+	if err != nil {
+		return nil, err
+	}
 	if mb.Len() > 0 {
 		c.Counter.Add(int64(mb.Len()))
 	}
-	return mb, err
+	return mb, nil
 }
-
-func (c *CounterReader) Interrupt()   { common.Interrupt(c.Reader) }
-func (c *CounterReader) Close() error { return common.Close(c.Reader) }

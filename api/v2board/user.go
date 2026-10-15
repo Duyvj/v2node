@@ -1,13 +1,14 @@
 package panel
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"strings"
 
+	"encoding/json/jsontext"
 	"encoding/json/v2"
+
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -15,173 +16,145 @@ type OnlineUser struct {
 	UID int
 	IP  string
 }
+
 type UserInfo struct {
 	Id          int    `json:"id" msgpack:"id"`
 	Uuid        string `json:"uuid" msgpack:"uuid"`
 	SpeedLimit  int    `json:"speed_limit" msgpack:"speed_limit"`
 	DeviceLimit int    `json:"device_limit" msgpack:"device_limit"`
 }
+
 type UserListBody struct {
 	Users []UserInfo `json:"users" msgpack:"users"`
 }
+
 type AliveMap struct {
 	Alive map[int]int `json:"alive"`
 }
-type UserTraffic struct {
-	UID              int
-	Upload, Download int64
-}
 
+// GetUserList will pull user from v2board
 func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
-	r, err := c.client.R().SetContext(ctx).SetHeader("If-None-Match", c.userEtag).
-		SetHeader("X-Response-Format", "msgpack").SetDoNotParseResponse(true).
-		Get("/api/v1/server/UniProxy/user")
+	const path = "/api/v1/server/UniProxy/user"
+	r, err := c.client.R().
+		SetContext(ctx).
+		SetHeader("If-None-Match", c.userEtag).
+		SetHeader("X-Response-Format", "msgpack").
+		SetDoNotParseResponse(true).
+		Get(path)
 	if err != nil {
 		return nil, err
 	}
 	if r == nil || r.RawResponse == nil {
-		return nil, fmt.Errorf("empty user response")
+		return nil, fmt.Errorf("received nil response or raw response")
 	}
 	defer r.RawResponse.Body.Close()
+
 	if r.StatusCode() == 304 {
-		if c.UserList == nil || c.UserList.Users == nil {
-			return nil, fmt.Errorf("304 without initial users")
-		}
-		// Retry applying the last desired state if a later stage failed.
-		return c.UserList.Users, nil
+		return nil, nil
 	}
-	if r.StatusCode() < 200 || r.StatusCode() >= 300 {
-		return nil, fmt.Errorf("user response HTTP %d", r.StatusCode())
-	}
-	data, err := io.ReadAll(io.LimitReader(r.RawResponse.Body, maxPanelBody+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxPanelBody {
-		return nil, errPanelBodyTooLarge
-	}
-	var users []UserInfo
+	userlist := &UserListBody{}
 	if strings.Contains(r.Header().Get("Content-Type"), "application/x-msgpack") {
-		users, err = decodeUsersMsgpack(data)
+		decoder := msgpack.NewDecoder(r.RawResponse.Body)
+		if err := decoder.Decode(userlist); err != nil {
+			return nil, fmt.Errorf("decode user list error: %w", err)
+		}
 	} else {
-		var body UserListBody
-		err = json.Unmarshal(data, &body)
-		users = body.Users
-	}
-	if err != nil {
-		return nil, fmt.Errorf("invalid user response: %w", err)
-	}
-	if users == nil {
-		return nil, fmt.Errorf("missing users array")
-	}
-	if len(users) > 100000 {
-		return nil, fmt.Errorf("too many users")
-	}
-	seen := make(map[string]struct{}, len(users))
-	for _, u := range users {
-		if u.Id <= 0 || u.Uuid == "" || len(u.Uuid) > 512 || u.SpeedLimit < 0 || u.SpeedLimit > 1000000000 || u.DeviceLimit < 0 || u.DeviceLimit > 1000000 {
-			return nil, fmt.Errorf("invalid user fields")
-		}
-		if _, ok := seen[u.Uuid]; ok {
-			return nil, fmt.Errorf("duplicate user credential")
-		}
-		seen[u.Uuid] = struct{}{}
-	}
-	c.UserList = &UserListBody{Users: users}
-	c.userEtag = r.Header().Get("ETag")
-	return users, nil
-}
-func decodeUsersMsgpack(data []byte) ([]UserInfo, error) {
-	d := msgpack.NewDecoder(bytes.NewReader(data))
-	n, err := d.DecodeMapLen()
-	if err != nil {
-		return nil, err
-	}
-	if n < 0 || n > 64 {
-		return nil, fmt.Errorf("invalid user response map")
-	}
-	var users []UserInfo
-	for i := 0; i < n; i++ {
-		key, err := d.DecodeString()
-		if err != nil {
-			return nil, err
-		}
-		if key != "users" {
-			if err := d.Skip(); err != nil {
-				return nil, err
+		dec := jsontext.NewDecoder(r.RawResponse.Body)
+		for {
+			tok, err := dec.ReadToken()
+			if err != nil {
+				return nil, fmt.Errorf("decode user list error: %w", err)
 			}
-			continue
+			if tok.Kind() == '"' && tok.String() == "users" {
+				break
+			}
 		}
-		if users != nil {
-			return nil, fmt.Errorf("duplicate users field")
-		}
-		count, err := d.DecodeArrayLen()
+		tok, err := dec.ReadToken()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("decode user list error: %w", err)
 		}
-		if count < 0 || count > 100000 {
-			return nil, fmt.Errorf("invalid user count")
+		if tok.Kind() != '[' {
+			return nil, fmt.Errorf(`decode user list error: expected "users" array`)
 		}
-		users = make([]UserInfo, 0, count)
-		for j := 0; j < count; j++ {
+		for dec.PeekKind() != ']' {
+			val, err := dec.ReadValue()
+			if err != nil {
+				return nil, fmt.Errorf("decode user list error: read user object: %w", err)
+			}
 			var u UserInfo
-			if err := d.Decode(&u); err != nil {
-				return nil, err
+			if err := json.Unmarshal(val, &u); err != nil {
+				return nil, fmt.Errorf("decode user list error: unmarshal user error: %w", err)
 			}
-			users = append(users, u)
+			userlist.Users = append(userlist.Users, u)
 		}
 	}
-	if _, err := d.PeekCode(); err != io.EOF {
-		return nil, fmt.Errorf("trailing msgpack data")
-	}
-	return users, nil
+	c.userEtag = r.Header().Get("ETag")
+	return userlist.Users, nil
 }
+
+// GetUserAlive will fetch the alive_ip count for users
 func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
-	r, err := c.client.R().SetContext(ctx).Get("/api/v1/server/UniProxy/alivelist")
+	c.AliveMap = &AliveMap{}
+	const path = "/api/v1/server/UniProxy/alivelist"
+	r, err := c.client.R().
+		SetContext(ctx).
+		ForceContentType("application/json").
+		Get(path)
 	if err != nil {
-		return nil, err
-	}
-	if r == nil || r.StatusCode() < 200 || r.StatusCode() >= 300 {
-		return nil, fmt.Errorf("alive response failed")
-	}
-	var body AliveMap
-	if err := json.Unmarshal(r.Body(), &body); err != nil {
-		return nil, fmt.Errorf("invalid alive response")
-	}
-	if body.Alive == nil {
-		body.Alive = make(map[int]int)
-	}
-	for uid, n := range body.Alive {
-		if uid <= 0 || n < 0 {
-			return nil, fmt.Errorf("invalid alive count")
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
 		}
+		c.AliveMap.Alive = make(map[int]int)
+		return c.AliveMap.Alive, nil
 	}
-	return body.Alive, nil
+	if r == nil || r.RawResponse == nil || r.StatusCode() >= 399 {
+		c.AliveMap.Alive = make(map[int]int)
+		return c.AliveMap.Alive, nil
+	}
+	defer r.RawResponse.Body.Close()
+	if err := json.Unmarshal(r.Body(), c.AliveMap); err != nil {
+		fmt.Printf("unmarshal user alive list error: %s", err)
+		c.AliveMap.Alive = make(map[int]int)
+	}
+
+	return c.AliveMap.Alive, nil
 }
-func (c *Client) ReportUserTraffic(ctx context.Context, traffic []UserTraffic) error {
-	data := make(map[int][2]int64, len(traffic))
-	for _, v := range traffic {
-		n := data[v.UID]
-		n[0] += v.Upload
-		n[1] += v.Download
-		data[v.UID] = n
+
+type UserTraffic struct {
+	UID      int
+	Upload   int64
+	Download int64
+}
+
+// ReportUserTraffic reports the user traffic
+func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffic) error {
+	data := make(map[int][]int64, len(userTraffic))
+	for i := range userTraffic {
+		data[userTraffic[i].UID] = []int64{userTraffic[i].Upload, userTraffic[i].Download}
 	}
-	r, err := c.reportClient.R().SetContext(ctx).SetBody(data).Post("/api/v1/server/UniProxy/push")
+	const path = "/api/v1/server/UniProxy/push"
+	_, err := c.client.R().
+		SetContext(ctx).
+		SetBody(data).
+		ForceContentType("application/json").
+		Post(path)
 	if err != nil {
 		return err
-	}
-	if r == nil || r.StatusCode() < 200 || r.StatusCode() >= 300 {
-		return fmt.Errorf("traffic report rejected")
 	}
 	return nil
 }
+
 func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]string) error {
-	r, err := c.reportClient.R().SetContext(ctx).SetBody(data).Post("/api/v1/server/UniProxy/alive")
+	const path = "/api/v1/server/UniProxy/alive"
+	_, err := c.client.R().
+		SetContext(ctx).
+		SetBody(data).
+		ForceContentType("application/json").
+		Post(path)
+
 	if err != nil {
 		return err
 	}
-	if r == nil || r.StatusCode() < 200 || r.StatusCode() >= 300 {
-		return fmt.Errorf("online report rejected")
-	}
+
 	return nil
 }

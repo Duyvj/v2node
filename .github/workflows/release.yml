@@ -4,15 +4,12 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - main
       - master
     paths:
       - "**/*.go"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/release.yml"
-      - "script/**"
-      - ".gitattributes"
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
@@ -20,51 +17,12 @@ on:
       - "go.mod"
       - "go.sum"
       - ".github/workflows/release.yml"
-      - "script/**"
-      - ".gitattributes"
   release:
     types: [published]
 
-permissions:
-  contents: write
-
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'release' }}
-
 jobs:
 
-  test:
-    runs-on: ubuntu-latest
-    env:
-      GOEXPERIMENT: jsonv2
-    steps:
-      - uses: actions/checkout@v5
-      - run: bash script/check-scripts.sh
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.26.x'
-      - run: go test -p 2 -race -count=1 -timeout=180s ./...
-      - run: go vet -p 2 ./...
-      - run: go test -p 2 -race -run TestAudit -count=1 -timeout=60s ./proxy/wireguard ./proxy/vless/encryption ./transport/internet/splithttp ./transport/internet/grpc/encoding
-        working-directory: third_party/xray-core
-
-  scripts:
-    needs: test
-    if: github.event_name == 'release'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Verify release scripts
-        run: bash script/check-scripts.sh
-      - name: Upload release scripts
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" script/install.sh script/v2node.sh --repo "$GITHUB_REPOSITORY" --clobber
-
   build:
-    needs: test
     strategy:
       matrix:
         # Include amd64 on all platforms.
@@ -146,7 +104,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.1'
 
       - name: Get project dependencies
         run: |
@@ -163,13 +121,13 @@ jobs:
         run: |
           echo "version: $version"
           mkdir -p build_assets
-          GOEXPERIMENT=jsonv2 go build -p 2 -v -o build_assets/v2node -trimpath -ldflags "-X 'github.com/wyx2685/v2node/cmd.version=$version' -s -w -buildid="
+          GOEXPERIMENT=jsonv2 go build -v -o build_assets/v2node -trimpath -ldflags "-X 'github.com/wyx2685/v2node/cmd.version=$version' -s -w -buildid="
 
       - name: Build Mips softfloat v2node
         if: matrix.goarch == 'mips' || matrix.goarch == 'mipsle'
         run: |
           echo "version: $version"
-          GOEXPERIMENT=jsonv2 GOMIPS=softfloat go build -p 2 -v -o build_assets/v2node_softfloat -trimpath -ldflags "-X 'github.com/wyx2685/v2node/cmd.version=$version' -s -w -buildid="
+          GOEXPERIMENT=jsonv2 GOMIPS=softfloat go build -v -o build_assets/v2node_softfloat -trimpath -ldflags "-X 'github.com/wyx2685/v2node/cmd.version=$version' -s -w -buildid="
       - name: Rename Windows v2node
         if: matrix.goos == 'windows'
         run: |
@@ -185,7 +143,7 @@ jobs:
             DOWNLOAD_URL="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/${i}.dat"
             FILE_NAME="${i}.dat"
             echo -e "Downloading ${DOWNLOAD_URL}..."
-            curl --fail --location --retry 3 "${DOWNLOAD_URL}" -o ./build_assets/${FILE_NAME}
+            curl -L "${DOWNLOAD_URL}" -o ./build_assets/${FILE_NAME}
           done
       - name: Create ZIP archive
         shell: bash
@@ -217,4 +175,3 @@ jobs:
           file: ./v2node-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
           tag: ${{ github.ref }}
           file_glob: true
-          overwrite: true

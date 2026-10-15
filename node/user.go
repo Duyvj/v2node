@@ -9,15 +9,13 @@ import (
 )
 
 func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
-	c.syncMu.Lock()
-	defer c.syncMu.Unlock()
 	var reportmin = 0
 	var devicemin = 0
 	if c.info.Common.BaseConfig != nil {
 		reportmin = c.info.Common.BaseConfig.NodeReportMinTraffic
 		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
 	}
-	userTraffic, commitTraffic := c.server.SnapshotUserTraffic(c.tag, reportmin)
+	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, reportmin)
 	if len(userTraffic) > 0 {
 		err = c.apiClient.ReportUserTraffic(ctx, userTraffic)
 		if err != nil {
@@ -29,7 +27,6 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				return err
 			}
 		} else {
-			commitTraffic()
 			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
 			//log.WithField("tag", c.tag).Debugf("User traffic: %+v", userTraffic)
 		}
@@ -41,7 +38,24 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 			"err": err,
 		}).Info("Get online device failed")
 	} else if len(*onlineDevice) > 0 {
-		data, reported := onlineReport(*onlineDevice, userTraffic, devicemin)
+		var result []panel.OnlineUser
+		var nocountUID = make(map[int]struct{})
+		for _, traffic := range userTraffic {
+			total := traffic.Upload + traffic.Download
+			if total < int64(devicemin*1000) {
+				nocountUID[traffic.UID] = struct{}{}
+			}
+		}
+		for _, online := range *onlineDevice {
+			if _, ok := nocountUID[online.UID]; !ok {
+				result = append(result, online)
+			}
+		}
+		data := make(map[int][]string)
+		for _, onlineuser := range result {
+			// json structure: { UID1:["ip1","ip2"],UID2:["ip3","ip4"] }
+			data[onlineuser.UID] = append(data[onlineuser.UID], onlineuser.IP)
+		}
 		if len(data) != 0 {
 			err := c.apiClient.ReportNodeOnlineUsers(ctx, &data)
 			if err != nil {
@@ -54,32 +68,10 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 				}
 			}
 		}
-		log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), reported)
+		log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), len(result))
 	}
 
 	return nil
-}
-
-func onlineReport(online []panel.OnlineUser, traffic []panel.UserTraffic, minimum int) (map[int][]string, int) {
-	var excluded map[int]struct{}
-	if minimum > 0 {
-		excluded = make(map[int]struct{})
-		for _, sample := range traffic {
-			if sample.Upload+sample.Download < int64(minimum)*1000 {
-				excluded[sample.UID] = struct{}{}
-			}
-		}
-	}
-	data := make(map[int][]string)
-	reported := 0
-	for _, user := range online {
-		if _, skip := excluded[user.UID]; skip {
-			continue
-		}
-		data[user.UID] = append(data[user.UID], user.IP)
-		reported++
-	}
-	return data, reported
 }
 
 func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []panel.UserInfo) {
@@ -92,10 +84,7 @@ func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []pane
 		if o, ok := oldMap[u.Uuid]; !ok {
 			added = append(added, u)
 		} else {
-			if o.Id != u.Id {
-				deleted = append(deleted, o)
-				added = append(added, u)
-			} else if o.SpeedLimit != u.SpeedLimit || o.DeviceLimit != u.DeviceLimit {
+			if o.SpeedLimit != u.SpeedLimit || o.DeviceLimit != u.DeviceLimit {
 				modified = append(modified, u)
 			}
 			delete(oldMap, u.Uuid)

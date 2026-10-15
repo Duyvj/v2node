@@ -49,8 +49,6 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 }
 
 func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
-	c.syncMu.Lock()
-	defer c.syncMu.Unlock()
 	// get node info
 	newN, err := c.apiClient.GetNodeInfo(ctx)
 	if err != nil {
@@ -105,10 +103,10 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 
 	// update alive list
 	if newA != nil {
-		c.limiter.UpdateAliveList(newA)
+		c.limiter.AliveList = newA
 	}
 	// node no changed, check users
-	if newU == nil {
+	if len(newU) == 0 {
 		log.WithField("tag", c.tag).Debug("User list no change")
 		return nil
 	}
