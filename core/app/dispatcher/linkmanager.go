@@ -1,11 +1,13 @@
 package dispatcher
 
 import (
-	sync "sync"
+	"sync"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 )
+
+const minLinkMapShrinkSize = 64
 
 type ManagedWriter struct {
 	writer  buf.Writer
@@ -22,25 +24,55 @@ func (w *ManagedWriter) Close() error {
 }
 
 type LinkManager struct {
-	links  map[*ManagedWriter]buf.Reader
-	mu     sync.RWMutex
-	closed bool
+	links     map[*ManagedWriter]buf.Reader
+	mu        sync.Mutex
+	highWater int
+	closed    bool
 }
 
-func (m *LinkManager) AddLink(writer *ManagedWriter, reader buf.Reader) {
+func newLinkManager() *LinkManager {
+	return &LinkManager{}
+}
+
+func (m *LinkManager) AddLink(writer *ManagedWriter, reader buf.Reader) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.closed {
-		m.links[writer] = reader
+	if m.closed {
+		return false
 	}
+	if m.links == nil {
+		m.links = make(map[*ManagedWriter]buf.Reader)
+	}
+	m.links[writer] = reader
+	if count := len(m.links); count > m.highWater {
+		m.highWater = count
+	}
+	return true
 }
 
 func (m *LinkManager) RemoveWriter(writer *ManagedWriter) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.closed {
-		delete(m.links, writer)
+	if m.closed {
+		return
 	}
+	delete(m.links, writer)
+	count := len(m.links)
+	if count == 0 {
+		m.links = nil
+		m.highWater = 0
+		return
+	}
+	if m.highWater < minLinkMapShrinkSize || count*4 > m.highWater {
+		return
+	}
+
+	shrunk := make(map[*ManagedWriter]buf.Reader, count)
+	for activeWriter, reader := range m.links {
+		shrunk[activeWriter] = reader
+	}
+	m.links = shrunk
+	m.highWater = count
 }
 
 func (m *LinkManager) CloseAll() {
@@ -52,7 +84,8 @@ func (m *LinkManager) CloseAll() {
 	m.closed = true
 
 	links := m.links
-	m.links = make(map[*ManagedWriter]buf.Reader)
+	m.links = nil
+	m.highWater = 0
 	m.mu.Unlock()
 
 	for w, r := range links {

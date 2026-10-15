@@ -10,7 +10,6 @@ import (
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/format"
-	"github.com/wyx2685/v2node/core/app/dispatcher"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/infra/conf"
@@ -63,11 +62,7 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 			tc := v.(*counter.TrafficCounter)
 			tc.Delete(user)
 		}
-		if v, ok := vc.dispatcher.LinkManagers.Load(user); ok {
-			lm := v.(*dispatcher.LinkManager)
-			lm.CloseAll()
-			vc.dispatcher.LinkManagers.Delete(user)
-		}
+		vc.dispatcher.RemoveUserLinks(user)
 	}
 	return nil
 }

@@ -101,7 +101,7 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 		ConnectionIdle:    proto.Uint32(120),
 		UplinkOnly:        proto.Uint32(2),
 		DownlinkOnly:      proto.Uint32(4),
-		BufferSize:        proto.Int32(128),
+		BufferSize:        proto.Int32(32),
 	}
 	corePolicyConfig := &coreConf.PolicyConfig{}
 	corePolicyConfig.Levels = map[uint32]*coreConf.Policy{0: levelPolicyConfig}

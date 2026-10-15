@@ -100,13 +100,15 @@ func (r *cachedReader) Interrupt() {
 
 // DefaultDispatcher is a default implementation of Dispatcher.
 type DefaultDispatcher struct {
-	ohm          outbound.Manager
-	router       routing.Router
-	policy       policy.Manager
-	stats        stats.Manager
-	fdns         dns.FakeDNSEngine
-	Counter      sync.Map
-	LinkManagers sync.Map // map[string]*LinkManager
+	ohm           outbound.Manager
+	router        routing.Router
+	policy        policy.Manager
+	stats         stats.Manager
+	fdns          dns.FakeDNSEngine
+	Counter       sync.Map
+	LinkManagers  sync.Map // map[string]*LinkManager
+	linkManagerMu sync.RWMutex
+	closed        bool
 }
 
 func init() {
@@ -144,7 +146,70 @@ func (*DefaultDispatcher) Start() error {
 }
 
 // Close implements common.Closable.
-func (*DefaultDispatcher) Close() error { return nil }
+func (d *DefaultDispatcher) Close() error {
+	d.linkManagerMu.Lock()
+	d.closed = true
+	d.LinkManagers.Range(func(key, value interface{}) bool {
+		value.(*LinkManager).CloseAll()
+		d.LinkManagers.Delete(key)
+		return true
+	})
+	d.Counter.Range(func(key, _ interface{}) bool {
+		d.Counter.Delete(key)
+		return true
+	})
+	d.linkManagerMu.Unlock()
+	return nil
+}
+
+func (d *DefaultDispatcher) getLinkManager(email string) (*LinkManager, bool) {
+	d.linkManagerMu.RLock()
+	defer d.linkManagerMu.RUnlock()
+	if d.closed {
+		return nil, false
+	}
+	if value, ok := d.LinkManagers.Load(email); ok {
+		return value.(*LinkManager), true
+	}
+	manager := newLinkManager()
+	value, _ := d.LinkManagers.LoadOrStore(email, manager)
+	return value.(*LinkManager), true
+}
+
+// RemoveUserLinks closes active links and releases the user's link manager.
+func (d *DefaultDispatcher) RemoveUserLinks(email string) {
+	d.linkManagerMu.Lock()
+	if value, ok := d.LinkManagers.Load(email); ok {
+		value.(*LinkManager).CloseAll()
+		d.LinkManagers.Delete(email)
+	}
+	d.linkManagerMu.Unlock()
+}
+
+func (d *DefaultDispatcher) getTrafficCounter(tag string) (*counter.TrafficCounter, bool) {
+	d.linkManagerMu.RLock()
+	if d.closed {
+		d.linkManagerMu.RUnlock()
+		return nil, false
+	}
+	if value, ok := d.Counter.Load(tag); ok {
+		d.linkManagerMu.RUnlock()
+		return value.(*counter.TrafficCounter), true
+	}
+	d.linkManagerMu.RUnlock()
+
+	d.linkManagerMu.Lock()
+	defer d.linkManagerMu.Unlock()
+	if d.closed {
+		return nil, false
+	}
+	if value, ok := d.Counter.Load(tag); ok {
+		return value.(*counter.TrafficCounter), true
+	}
+	t := counter.NewTrafficCounter()
+	value, _ := d.Counter.LoadOrStore(tag, t)
+	return value.(*counter.TrafficCounter), true
+}
 
 func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link, *limiter.Limiter, error) {
 	opt := pipe.OptionsFromContext(ctx)
@@ -191,32 +256,29 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			common.Interrupt(inboundLink.Reader)
 			return nil, nil, nil, errors.New("Limited ", user.Email, " by conn or ip")
 		}
-		var lm *LinkManager
-		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
-			lm = &LinkManager{
-				links: make(map[*ManagedWriter]buf.Reader),
-			}
-			d.LinkManagers.Store(user.Email, lm)
-		} else {
-			lm = lmloaded.(*LinkManager)
+		lm, ok := d.getLinkManager(user.Email)
+		if !ok {
+			closeLinkPair(inboundLink, outboundLink)
+			return nil, nil, nil, errors.New("dispatcher is closed")
 		}
 		managedWriter := &ManagedWriter{
 			writer:  uplinkWriter,
 			manager: lm,
 		}
-		lm.AddLink(managedWriter, outboundLink.Reader)
 		inboundLink.Writer = managedWriter
+		if !lm.AddLink(managedWriter, outboundLink.Reader) {
+			closeLinkPair(inboundLink, outboundLink)
+			return nil, nil, nil, errors.New("user links are closed")
+		}
 		if w != nil {
 			sessionInbound.CanSpliceCopy = 3
 			inboundLink.Writer = rate.NewRateLimitWriter(inboundLink.Writer, w)
 			outboundLink.Writer = rate.NewRateLimitWriter(outboundLink.Writer, w)
 		}
-		var t *counter.TrafficCounter
-		if c, ok := d.Counter.Load(sessionInbound.Tag); !ok {
-			t = counter.NewTrafficCounter()
-			d.Counter.Store(sessionInbound.Tag, t)
-		} else {
-			t = c.(*counter.TrafficCounter)
+		t, ok := d.getTrafficCounter(sessionInbound.Tag)
+		if !ok {
+			closeLinkPair(inboundLink, outboundLink)
+			return nil, nil, nil, errors.New("dispatcher is closed")
 		}
 
 		ts := t.GetCounter(user.Email)
@@ -233,6 +295,13 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 	}
 
 	return inboundLink, outboundLink, limit, nil
+}
+
+func closeLinkPair(inbound, outbound *transport.Link) {
+	common.Close(outbound.Writer)
+	common.Close(inbound.Writer)
+	common.Interrupt(outbound.Reader)
+	common.Interrupt(inbound.Reader)
 }
 
 func (d *DefaultDispatcher) shouldOverride(ctx context.Context, result SniffResult, request session.SniffingRequest, destination net.Destination) bool {
@@ -373,14 +442,11 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			common.Interrupt(outbound.Reader)
 			return errors.New("Limited ", user.Email, " by conn or ip")
 		}
-		var lm *LinkManager
-		if lmloaded, ok := d.LinkManagers.Load(user.Email); !ok {
-			lm = &LinkManager{
-				links: make(map[*ManagedWriter]buf.Reader),
-			}
-			d.LinkManagers.Store(user.Email, lm)
-		} else {
-			lm = lmloaded.(*LinkManager)
+		lm, ok := d.getLinkManager(user.Email)
+		if !ok {
+			common.Close(outbound.Writer)
+			common.Interrupt(outbound.Reader)
+			return errors.New("dispatcher is closed")
 		}
 		managedWriter := &ManagedWriter{
 			writer:  outbound.Writer,
@@ -391,12 +457,11 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			sessionInbound.CanSpliceCopy = 3
 			outbound.Writer = rate.NewRateLimitWriter(outbound.Writer, w)
 		}
-		var t *counter.TrafficCounter
-		if c, ok := d.Counter.Load(sessionInbound.Tag); !ok {
-			t = counter.NewTrafficCounter()
-			d.Counter.Store(sessionInbound.Tag, t)
-		} else {
-			t = c.(*counter.TrafficCounter)
+		t, ok := d.getTrafficCounter(sessionInbound.Tag)
+		if !ok {
+			common.Close(outbound.Writer)
+			common.Interrupt(outbound.Reader)
+			return errors.New("dispatcher is closed")
 		}
 
 		ts := t.GetCounter(user.Email)
@@ -405,7 +470,11 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			Reader:  &buf.TimeoutWrapperReader{Reader: outbound.Reader},
 			Counter: &ts.UpCounter,
 		}
-		lm.AddLink(managedWriter, outbound.Reader)
+		if !lm.AddLink(managedWriter, outbound.Reader) {
+			common.Close(outbound.Writer)
+			common.Interrupt(outbound.Reader)
+			return errors.New("user links are closed")
+		}
 		outbound.Writer = &dispatcher.SizeStatWriter{
 			Counter: downcounter,
 			Writer:  outbound.Writer,
