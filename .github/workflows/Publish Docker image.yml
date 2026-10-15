@@ -1,5 +1,9 @@
 name: Publish Docker image
 
+permissions:
+  contents: read
+  packages: write
+
 on:
   workflow_dispatch:
   release:
@@ -11,7 +15,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/v2node
+  IMAGE_NAME: duyvj/v2node
 
 jobs:
   build:
