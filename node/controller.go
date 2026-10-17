@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -13,8 +14,17 @@ import (
 	"github.com/wyx2685/v2node/limiter"
 )
 
+type nodeServer interface {
+	AddNode(tag string, info *panel.NodeInfo) error
+	DelNode(tag string) error
+	AddUsers(p *core.AddUsersParams) (int, error)
+	DelUsers(users []panel.UserInfo, tag string, info *panel.NodeInfo) error
+	GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserTraffic, error)
+}
+
 type Controller struct {
-	server                  *core.V2Core
+	server                  nodeServer
+	reloadCh                chan struct{}
 	apiClient               *panel.Client
 	tag                     string
 	limiter                 *limiter.Limiter
@@ -22,6 +32,7 @@ type Controller struct {
 	aliveMap                map[int]int
 	conf                    *conf.NodeConfig
 	info                    *panel.NodeInfo
+	infoMu                  sync.RWMutex
 	nodeInfoMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
@@ -41,6 +52,7 @@ func NewController(api *panel.Client, conf *conf.NodeConfig, info *panel.NodeInf
 func (c *Controller) Start(x *core.V2Core) error {
 	// Init Core
 	c.server = x
+	c.reloadCh = x.ReloadCh
 	var err error
 	// First fetch Node Info
 	node := c.info
@@ -110,4 +122,16 @@ func (c *Controller) Close() error {
 		return fmt.Errorf("del node error: %s", err)
 	}
 	return nil
+}
+
+func (c *Controller) nodeInfo() *panel.NodeInfo {
+	c.infoMu.RLock()
+	defer c.infoMu.RUnlock()
+	return c.info
+}
+
+func (c *Controller) setNodeInfo(info *panel.NodeInfo) {
+	c.infoMu.Lock()
+	c.info = info
+	c.infoMu.Unlock()
 }

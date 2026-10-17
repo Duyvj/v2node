@@ -11,9 +11,9 @@ import (
 func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	var reportmin = 0
 	var devicemin = 0
-	if c.info.Common.BaseConfig != nil {
-		reportmin = c.info.Common.BaseConfig.NodeReportMinTraffic
-		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
+	if base := c.nodeInfo().Common.BaseConfig; base != nil {
+		reportmin = base.NodeReportMinTraffic
+		devicemin = base.DeviceOnlineMinTraffic
 	}
 	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, reportmin)
 	if len(userTraffic) > 0 {

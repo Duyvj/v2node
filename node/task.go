@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"reflect"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -17,14 +18,14 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 		Name:     "nodeInfoMonitor",
 		Interval: node.PullInterval,
 		Execute:  c.nodeInfoMonitor,
-		ReloadCh: c.server.ReloadCh,
+		ReloadCh: c.reloadCh,
 	}
 	// fetch user list task
 	c.userReportPeriodic = &task.Task{
 		Name:     "reportUserTrafficTask",
 		Interval: node.PushInterval,
 		Execute:  c.reportUserTrafficTask,
-		ReloadCh: c.server.ReloadCh,
+		ReloadCh: c.reloadCh,
 	}
 	log.WithField("tag", c.tag).Info("Start monitor node status")
 	// delay to start nodeInfoMonitor
@@ -39,7 +40,7 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 				Name:     "renewCertTask",
 				Interval: time.Hour * 24,
 				Execute:  c.renewCertTask,
-				ReloadCh: c.server.ReloadCh,
+				ReloadCh: c.reloadCh,
 			}
 			log.WithField("tag", c.tag).Info("Start renew cert")
 			// delay to start renewCert
@@ -62,17 +63,20 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		return nil
 	}
 	if newN != nil {
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-		}).Error("Got new node info, reload")
-		if c.server.ReloadCh != nil {
-			select {
-			case c.server.ReloadCh <- struct{}{}:
-			default:
-			}
-		} else {
-			log.Panic("Reload failed")
+		if needsReload(c.info, newN) {
+			log.WithField("tag", c.tag).Warn("Got new node info, reload")
+			c.requestReload()
+			return nil
 		}
+		if err := c.rebuildInbound(newN); err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Error("Rebuild inbound failed, reload")
+			c.requestReload()
+			return nil
+		}
+		log.WithField("tag", c.tag).Info("Got new node info, inbound rebuilt")
 	}
 	log.WithField("tag", c.tag).Debug("Node info no change")
 
@@ -144,4 +148,44 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	c.userList = newU
 	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
 	return nil
+}
+
+func needsReload(old, new *panel.NodeInfo) bool {
+	return old.Tag != new.Tag ||
+		old.Security != new.Security ||
+		old.PullInterval != new.PullInterval ||
+		old.PushInterval != new.PushInterval ||
+		old.Common.CertInfo.CertMode != new.Common.CertInfo.CertMode ||
+		!reflect.DeepEqual(old.Common.Routes, new.Common.Routes)
+}
+
+func (c *Controller) rebuildInbound(info *panel.NodeInfo) error {
+	c.setNodeInfo(info)
+	if info.Security == panel.Tls {
+		if err := c.requestCert(); err != nil {
+			return err
+		}
+	}
+	if err := c.server.DelNode(c.tag); err != nil {
+		return err
+	}
+	if err := c.server.AddNode(c.tag, info); err != nil {
+		return err
+	}
+	_, err := c.server.AddUsers(&vCore.AddUsersParams{
+		Tag:      c.tag,
+		Users:    c.userList,
+		NodeInfo: info,
+	})
+	return err
+}
+
+func (c *Controller) requestReload() {
+	if c.reloadCh == nil {
+		log.Panic("Reload failed")
+	}
+	select {
+	case c.reloadCh <- struct{}{}:
+	default:
+	}
 }
