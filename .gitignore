@@ -16,3 +16,5 @@ output/*
 .idea/*
 new.sh
 quick_update.sh
+
+CLAUDE.md
