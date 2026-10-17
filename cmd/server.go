@@ -11,6 +11,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/wyx2685/v2node/common/memlimit"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core"
 	"github.com/wyx2685/v2node/limiter"
@@ -68,6 +69,9 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			log.WithField("err", err).Error("Open log file failed, using stdout instead")
 		}
 		log.SetOutput(f)
+	}
+	if limit := memlimit.Apply(); limit > 0 {
+		log.Infof("Go memory limit set to %d MiB", limit>>20)
 	}
 	// Enable pprof if configured
 	if c.PprofPort != 0 {
