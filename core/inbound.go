@@ -141,9 +141,9 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 			in.StreamSetting.TLSSettings = &coreConf.TLSConfig{
 				Certs: []*coreConf.TLSCertConfig{
 					{
-						CertFile:     nodeInfo.Common.CertInfo.CertFile,
-						KeyFile:      nodeInfo.Common.CertInfo.KeyFile,
-						OcspStapling: 3600,
+						CertFile:       nodeInfo.Common.CertInfo.CertFile,
+						KeyFile:        nodeInfo.Common.CertInfo.KeyFile,
+						OneTimeLoading: true,
 					},
 				},
 				RejectUnknownSNI: nodeInfo.Common.CertInfo.RejectUnknownSni,

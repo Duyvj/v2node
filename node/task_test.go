@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
@@ -22,17 +24,18 @@ type mockPanel struct {
 	port   int
 	routes string
 	users  string
+	tls    string
 }
 
 func newMockPanel(t *testing.T) *mockPanel {
-	p := &mockPanel{port: 1000, routes: "[]", users: `[{"id":1,"uuid":"00000000-0000-4000-8000-000000000001"}]`}
+	p := &mockPanel{port: 1000, routes: "[]", users: `[{"id":1,"uuid":"00000000-0000-4000-8000-000000000001"}]`, tls: `"tls":0`}
 	p.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/v2/server/config":
-			fmt.Fprintf(w, `{"protocol":"vmess","listen_ip":"0.0.0.0","server_port":%d,"tls":0,"network":"tcp","network_settings":{},"routes":%s,"base_config":{"push_interval":60,"pull_interval":60}}`, p.port, p.routes)
+			fmt.Fprintf(w, `{"protocol":"vmess","listen_ip":"0.0.0.0","server_port":%d,%s,"network":"tcp","network_settings":{},"routes":%s,"base_config":{"push_interval":60,"pull_interval":60}}`, p.port, p.tls, p.routes)
 		case "/api/v1/server/UniProxy/user":
 			fmt.Fprintf(w, `{"users":%s}`, p.users)
 		case "/api/v1/server/UniProxy/alivelist":
@@ -109,6 +112,7 @@ func newTestController(t *testing.T, p *mockPanel, srv *fakeServer) *Controller 
 	c.tag = info.Tag
 	c.userList = users
 	c.limiter = limiter.AddLimiter(info.Type, c.tag, users, map[int]int{})
+	c.certDigest = certDigest(info)
 	t.Cleanup(func() { limiter.DeleteLimiter(c.tag) })
 	return c
 }
@@ -179,5 +183,44 @@ func TestFailedRebuildFallsBackToFullReload(t *testing.T) {
 	}
 	if want := []string{"DelNode", "AddNode:2000"}; !slices.Equal(srv.calls, want) {
 		t.Fatalf("calls = %v, want %v", srv.calls, want)
+	}
+}
+
+func TestCertificateFileChangeRebuildsInbound(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile := filepath.Join(dir, "node.cer"), filepath.Join(dir, "node.key")
+	os.WriteFile(certFile, []byte("cert-v1"), 0o644)
+	os.WriteFile(keyFile, []byte("key-v1"), 0o600)
+	p := newMockPanel(t)
+	p.set(func(p *mockPanel) {
+		p.tls = fmt.Sprintf(`"tls":1,"tls_settings":{"cert_mode":"file","cert_file":%q,"key_file":%q}`, certFile, keyFile)
+	})
+	srv := &fakeServer{}
+	c := newTestController(t, p, srv)
+
+	if err := c.nodeInfoMonitor(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(srv.calls) != 0 {
+		t.Fatalf("unchanged certificate rebuilt the inbound: %v", srv.calls)
+	}
+
+	os.WriteFile(certFile, []byte("cert-v2"), 0o644)
+	if err := c.nodeInfoMonitor(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"DelNode", "AddNode:1000", "AddUsers:1"}; !slices.Equal(srv.calls, want) {
+		t.Fatalf("calls after certificate renewal = %v, want %v", srv.calls, want)
+	}
+	if reloadRequested(c) {
+		t.Fatal("a renewed certificate reloaded the whole core")
+	}
+
+	srv.calls = nil
+	if err := c.nodeInfoMonitor(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(srv.calls) != 0 {
+		t.Fatalf("the same renewed certificate rebuilt the inbound again: %v", srv.calls)
 	}
 }

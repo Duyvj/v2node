@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
+	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/file"
 )
 
@@ -28,6 +31,22 @@ func (c *Controller) renewCertTask(_ context.Context) error {
 		return nil
 	}
 	return nil
+}
+
+func certDigest(info *panel.NodeInfo) string {
+	cert := info.Common.CertInfo
+	if info.Security != panel.Tls || cert == nil {
+		return ""
+	}
+	h := sha256.New()
+	for _, path := range []string{cert.CertFile, cert.KeyFile} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return ""
+		}
+		h.Write(b)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (c *Controller) requestCert() error {

@@ -77,6 +77,16 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 			return nil
 		}
 		log.WithField("tag", c.tag).Info("Got new node info, inbound rebuilt")
+	} else if digest := certDigest(c.info); digest != "" && digest != c.certDigest {
+		if err := c.rebuildInbound(c.info); err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Error("Rebuild inbound for new certificate failed, reload")
+			c.requestReload()
+			return nil
+		}
+		log.WithField("tag", c.tag).Info("Certificate changed, inbound rebuilt")
 	}
 	log.WithField("tag", c.tag).Debug("Node info no change")
 
@@ -172,12 +182,15 @@ func (c *Controller) rebuildInbound(info *panel.NodeInfo) error {
 	if err := c.server.AddNode(c.tag, info); err != nil {
 		return err
 	}
-	_, err := c.server.AddUsers(&vCore.AddUsersParams{
+	if _, err := c.server.AddUsers(&vCore.AddUsersParams{
 		Tag:      c.tag,
 		Users:    c.userList,
 		NodeInfo: info,
-	})
-	return err
+	}); err != nil {
+		return err
+	}
+	c.certDigest = certDigest(info)
+	return nil
 }
 
 func (c *Controller) requestReload() {

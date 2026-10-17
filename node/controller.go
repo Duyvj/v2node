@@ -33,6 +33,7 @@ type Controller struct {
 	conf                    *conf.NodeConfig
 	info                    *panel.NodeInfo
 	infoMu                  sync.RWMutex
+	certDigest              string
 	nodeInfoMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
@@ -85,6 +86,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 		if err != nil {
 			return fmt.Errorf("request cert error: %s", err)
 		}
+		c.certDigest = certDigest(node)
 	}
 	// Add new tag
 	err = c.server.AddNode(c.tag, node)
