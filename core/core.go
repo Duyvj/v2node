@@ -8,6 +8,7 @@ import (
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core/app/dispatcher"
 	_ "github.com/wyx2685/v2node/core/distro/all"
+	"github.com/xtls/xray-core/app/policy"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/app/stats"
 	"github.com/xtls/xray-core/common/serial"
@@ -78,6 +79,19 @@ func (v *V2Core) Close() error {
 	return nil
 }
 
+func buildPolicyConfig() (*policy.Config, error) {
+	level := &coreConf.Policy{
+		StatsUserUplink:   true,
+		StatsUserDownlink: true,
+		Handshake:         proto.Uint32(4),
+		ConnectionIdle:    proto.Uint32(120),
+		UplinkOnly:        proto.Uint32(1),
+		DownlinkOnly:      proto.Uint32(1),
+		BufferSize:        proto.Int32(0),
+	}
+	return (&coreConf.PolicyConfig{Levels: map[uint32]*coreConf.Policy{0: level}}).Build()
+}
+
 func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 	// Log Config
 	coreLogConfig := &coreConf.LogConfig{
@@ -93,19 +107,7 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 	// Inbound config
 	var inBoundConfig []*core.InboundHandlerConfig
 
-	// Policy config
-	levelPolicyConfig := &coreConf.Policy{
-		StatsUserUplink:   true,
-		StatsUserDownlink: true,
-		Handshake:         proto.Uint32(4),
-		ConnectionIdle:    proto.Uint32(120),
-		UplinkOnly:        proto.Uint32(2),
-		DownlinkOnly:      proto.Uint32(4),
-		BufferSize:        proto.Int32(32),
-	}
-	corePolicyConfig := &coreConf.PolicyConfig{}
-	corePolicyConfig.Levels = map[uint32]*coreConf.Policy{0: levelPolicyConfig}
-	policyConfig, _ := corePolicyConfig.Build()
+	policyConfig, _ := buildPolicyConfig()
 	// Build Xray conf
 	config := &core.Config{
 		App: []*serial.TypedMessage{
