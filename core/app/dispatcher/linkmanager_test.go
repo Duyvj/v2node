@@ -132,8 +132,8 @@ func TestDefaultDispatcherCloseReleasesTrackedState(t *testing.T) {
 	if got := reader.interrupted.Load(); got != 1 {
 		t.Fatalf("reader interrupt count = %d, want 1", got)
 	}
-	if _, ok := dispatcher.getLinkManager("new-user"); ok {
-		t.Fatal("dispatcher created a link manager after Close")
+	if dispatcher.trackLink("new-user", &ManagedWriter{writer: &linkManagerTestWriter{}}, nil) {
+		t.Fatal("dispatcher tracked a link after Close")
 	}
 	if found := syncMapHasEntries(&dispatcher.LinkManagers); found {
 		t.Fatal("dispatcher retained link managers after Close")

@@ -162,18 +162,29 @@ func (d *DefaultDispatcher) Close() error {
 	return nil
 }
 
-func (d *DefaultDispatcher) getLinkManager(email string) (*LinkManager, bool) {
+func (d *DefaultDispatcher) trackLink(email string, writer *ManagedWriter, reader buf.Reader) bool {
 	d.linkManagerMu.RLock()
 	defer d.linkManagerMu.RUnlock()
 	if d.closed {
-		return nil, false
+		return false
 	}
-	if value, ok := d.LinkManagers.Load(email); ok {
-		return value.(*LinkManager), true
+	value, ok := d.LinkManagers.Load(email)
+	if !ok {
+		manager := newLinkManager()
+		manager.onEmpty = func() { d.dropLinkManager(email, manager) }
+		value, _ = d.LinkManagers.LoadOrStore(email, manager)
 	}
-	manager := newLinkManager()
-	value, _ := d.LinkManagers.LoadOrStore(email, manager)
-	return value.(*LinkManager), true
+	manager := value.(*LinkManager)
+	writer.manager = manager
+	return manager.AddLink(writer, reader)
+}
+
+func (d *DefaultDispatcher) dropLinkManager(email string, manager *LinkManager) {
+	d.linkManagerMu.Lock()
+	if manager.isEmpty() {
+		d.LinkManagers.CompareAndDelete(email, manager)
+	}
+	d.linkManagerMu.Unlock()
 }
 
 // RemoveUserLinks closes active links and releases the user's link manager.
@@ -211,7 +222,7 @@ func (d *DefaultDispatcher) getTrafficCounter(tag string) (*counter.TrafficCount
 	return value.(*counter.TrafficCounter), true
 }
 
-func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link, *limiter.Limiter, error) {
+func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link, func(), error) {
 	opt := pipe.OptionsFromContext(ctx)
 	uplinkReader, uplinkWriter := pipe.New(opt...)
 	downlinkReader, downlinkWriter := pipe.New(opt...)
@@ -232,10 +243,9 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 		user = sessionInbound.User
 	}
 
-	var limit *limiter.Limiter
-	var err error
+	release := func() {}
 	if user != nil && len(user.Email) > 0 {
-		limit, err = limiter.GetLimiter(sessionInbound.Tag)
+		limit, err := limiter.GetLimiter(sessionInbound.Tag)
 		if err != nil {
 			errors.LogInfo(ctx, "get limiter ", sessionInbound.Tag, " error: ", err)
 			common.Close(outboundLink.Writer)
@@ -256,20 +266,13 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			common.Interrupt(inboundLink.Reader)
 			return nil, nil, nil, errors.New("Limited ", user.Email, " by conn or ip")
 		}
-		lm, ok := d.getLinkManager(user.Email)
-		if !ok {
-			closeLinkPair(inboundLink, outboundLink)
-			return nil, nil, nil, errors.New("dispatcher is closed")
-		}
-		managedWriter := &ManagedWriter{
-			writer:  uplinkWriter,
-			manager: lm,
-		}
+		managedWriter := &ManagedWriter{writer: uplinkWriter}
 		inboundLink.Writer = managedWriter
-		if !lm.AddLink(managedWriter, outboundLink.Reader) {
+		if !d.trackLink(user.Email, managedWriter, outboundLink.Reader) {
 			closeLinkPair(inboundLink, outboundLink)
 			return nil, nil, nil, errors.New("user links are closed")
 		}
+		release = func() { managedWriter.manager.RemoveWriter(managedWriter) }
 		if w != nil {
 			sessionInbound.CanSpliceCopy = 3
 			inboundLink.Writer = rate.NewRateLimitWriter(inboundLink.Writer, w)
@@ -294,7 +297,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 		}
 	}
 
-	return inboundLink, outboundLink, limit, nil
+	return inboundLink, outboundLink, release, nil
 }
 
 func closeLinkPair(inbound, outbound *transport.Link) {
@@ -357,14 +360,18 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 		ctx = session.ContextWithContent(ctx, content)
 	}
 	sniffingRequest := content.SniffingRequest
-	inbound, outbound, _, err := d.getLink(ctx)
+	inbound, outbound, release, err := d.getLink(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if !sniffingRequest.Enabled {
-		go d.routedDispatch(ctx, outbound, destination)
+		go func() {
+			defer release()
+			d.routedDispatch(ctx, outbound, destination)
+		}()
 	} else {
 		go func() {
+			defer release()
 			cReader := &cachedReader{
 				reader: outbound.Reader.(*pipe.Reader),
 			}
@@ -442,16 +449,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			common.Interrupt(outbound.Reader)
 			return errors.New("Limited ", user.Email, " by conn or ip")
 		}
-		lm, ok := d.getLinkManager(user.Email)
-		if !ok {
-			common.Close(outbound.Writer)
-			common.Interrupt(outbound.Reader)
-			return errors.New("dispatcher is closed")
-		}
-		managedWriter := &ManagedWriter{
-			writer:  outbound.Writer,
-			manager: lm,
-		}
+		managedWriter := &ManagedWriter{writer: outbound.Writer}
 		outbound.Writer = managedWriter
 		if w != nil {
 			sessionInbound.CanSpliceCopy = 3
@@ -470,11 +468,12 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			Reader:  &buf.TimeoutWrapperReader{Reader: outbound.Reader},
 			Counter: &ts.UpCounter,
 		}
-		if !lm.AddLink(managedWriter, outbound.Reader) {
+		if !d.trackLink(user.Email, managedWriter, outbound.Reader) {
 			common.Close(outbound.Writer)
 			common.Interrupt(outbound.Reader)
 			return errors.New("user links are closed")
 		}
+		defer managedWriter.manager.RemoveWriter(managedWriter)
 		outbound.Writer = &dispatcher.SizeStatWriter{
 			Counter: downcounter,
 			Writer:  outbound.Writer,

@@ -19,7 +19,9 @@ func (w *ManagedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 }
 
 func (w *ManagedWriter) Close() error {
-	w.manager.RemoveWriter(w)
+	if w.manager != nil {
+		w.manager.RemoveWriter(w)
+	}
 	return common.Close(w.writer)
 }
 
@@ -28,6 +30,7 @@ type LinkManager struct {
 	mu        sync.Mutex
 	highWater int
 	closed    bool
+	onEmpty   func()
 }
 
 func newLinkManager() *LinkManager {
@@ -51,20 +54,29 @@ func (m *LinkManager) AddLink(writer *ManagedWriter, reader buf.Reader) bool {
 }
 
 func (m *LinkManager) RemoveWriter(writer *ManagedWriter) {
+	if m.removeWriter(writer) && m.onEmpty != nil {
+		m.onEmpty()
+	}
+}
+
+func (m *LinkManager) removeWriter(writer *ManagedWriter) (empty bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
-		return
+		return false
+	}
+	if _, ok := m.links[writer]; !ok {
+		return false
 	}
 	delete(m.links, writer)
 	count := len(m.links)
 	if count == 0 {
 		m.links = nil
 		m.highWater = 0
-		return
+		return true
 	}
 	if m.highWater < minLinkMapShrinkSize || count*4 > m.highWater {
-		return
+		return false
 	}
 
 	shrunk := make(map[*ManagedWriter]buf.Reader, count)
@@ -73,6 +85,13 @@ func (m *LinkManager) RemoveWriter(writer *ManagedWriter) {
 	}
 	m.links = shrunk
 	m.highWater = count
+	return false
+}
+
+func (m *LinkManager) isEmpty() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.links) == 0
 }
 
 func (m *LinkManager) CloseAll() {
