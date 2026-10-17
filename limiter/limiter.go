@@ -169,22 +169,28 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 	}
 	if noUDPsource || l.Nodetype == "hysteria2" || l.Nodetype == "tuic" {
 		// Store online user for device limit
-		newipMap := new(sync.Map)
-		newipMap.Store(ip, uid)
 		aliveIp := l.AliveList[uid]
+		v, loaded := l.UserOnlineIP.Load(taguuid)
+		if !loaded {
+			newipMap := new(sync.Map)
+			newipMap.Store(ip, uid)
+			v, loaded = l.UserOnlineIP.LoadOrStore(taguuid, newipMap)
+		}
 		// If any device is online
-		if v, loaded := l.UserOnlineIP.LoadOrStore(taguuid, newipMap); loaded {
+		if loaded {
 			oldipMap := v.(*sync.Map)
 			// If this is a new ip
-			if _, loaded := oldipMap.LoadOrStore(ip, uid); !loaded {
-				if v, loaded := l.OldUserOnline.Load(ip); loaded {
-					if v.(int) == uid {
-						l.OldUserOnline.Delete(ip)
-					}
-				} else if deviceLimit > 0 {
-					if deviceLimit <= aliveIp {
-						oldipMap.Delete(ip)
-						return nil, true
+			if _, known := oldipMap.Load(ip); !known {
+				if _, loaded := oldipMap.LoadOrStore(ip, uid); !loaded {
+					if v, loaded := l.OldUserOnline.Load(ip); loaded {
+						if v.(int) == uid {
+							l.OldUserOnline.Delete(ip)
+						}
+					} else if deviceLimit > 0 {
+						if deviceLimit <= aliveIp {
+							oldipMap.Delete(ip)
+							return nil, true
+						}
 					}
 				}
 			}
